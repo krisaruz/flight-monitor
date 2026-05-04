@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 机票价格监控工具 - Flight Price Monitor
 ========================================
@@ -22,12 +24,16 @@ import io
 import json
 import logging
 import os
+import random
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -42,10 +48,25 @@ def load_env() -> None:
     load_dotenv(root / ".env")
     load_dotenv()
 
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-    os.system("")  # enable ANSI escape on Windows
+
+def ensure_windows_utf8_stdio() -> None:
+    """在 Windows 控制台使用 UTF-8 输出；仅在 CLI 入口调用，避免影响 pytest 等环境。"""
+    if sys.platform != "win32":
+        return
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+        os.system("")  # enable ANSI
+    except (AttributeError, OSError):
+        pass
+
+
+def get_request_delay_sec() -> float:
+    """相邻 Amadeus 请求之间的间隔（秒），可用环境变量 AMADEUS_REQUEST_DELAY 覆盖。"""
+    try:
+        return max(0.05, float(os.environ.get("AMADEUS_REQUEST_DELAY", "0.15")))
+    except ValueError:
+        return 0.15
 
 
 # ─── 数据模型 ────────────────────────────────────────────────────────────────
@@ -67,8 +88,8 @@ class FlightOption:
     return_date: str
     total_price: float
     currency: str
-    outbound_segments: list = field(default_factory=list)
-    return_segments: list = field(default_factory=list)
+    outbound_segments: list[FlightSegment] = field(default_factory=list)
+    return_segments: list[FlightSegment] = field(default_factory=list)
     booking_class: str = ""
     source: str = ""
 
@@ -106,22 +127,45 @@ class FlightOption:
 # ─── Amadeus API 搜索 ───────────────────────────────────────────────────────
 
 class AmadeusFlightSearch:
-    """使用 Amadeus Self-Service API 搜索航班"""
-
-    BASE_URL = "https://test.api.amadeus.com"  # test 环境, 换 production 用 api.amadeus.com
+    """使用 Amadeus Self-Service API；对 429 / 5xx / 网络错误做退避重试。"""
 
     def __init__(self, client_id: str, client_secret: str, production: bool = False):
         self.client_id = client_id
         self.client_secret = client_secret
-        if production:
-            self.BASE_URL = "https://api.amadeus.com"
+        self.base_url = "https://api.amadeus.com" if production else "https://test.api.amadeus.com"
+        self.token: Optional[str] = None
+        self.token_expires = 0.0
+
+    def _invalidate_token(self) -> None:
         self.token = None
-        self.token_expires = 0
+        self.token_expires = 0.0
 
-    def _get_token(self):
-        import urllib.request
-        import urllib.parse
+    @staticmethod
+    def _parse_error_body(body: bytes) -> str:
+        try:
+            err = json.loads(body.decode("utf-8", errors="replace"))
+            if isinstance(err, dict):
+                errs = err.get("errors")
+                if isinstance(errs, list) and errs:
+                    first = errs[0]
+                    detail = first.get("detail") or first.get("title") or str(first)
+                    return str(detail)
+                return str(
+                    err.get("error_description")
+                    or err.get("error")
+                    or json.dumps(err, ensure_ascii=False)[:200],
+                )
+        except Exception:
+            pass
+        return body.decode("utf-8", errors="replace")[:300]
 
+    def _sleep_backoff(self, attempt: int, retry_after: Optional[float]) -> None:
+        if retry_after is not None and retry_after > 0:
+            time.sleep(min(retry_after + random.uniform(0, 0.5), 120))
+        else:
+            time.sleep(min(2**attempt + random.uniform(0, 0.3), 60))
+
+    def _fetch_oauth_token(self) -> str:
         if self.token and time.time() < self.token_expires - 60:
             return self.token
 
@@ -130,33 +174,100 @@ class AmadeusFlightSearch:
             "client_id": self.client_id,
             "client_secret": self.client_secret,
         }).encode()
-
+        url = f"{self.base_url}/v1/security/oauth2/token"
         req = urllib.request.Request(
-            f"{self.BASE_URL}/v1/security/oauth2/token",
+            url,
             data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read())
+        for attempt in range(5):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    self.token = result["access_token"]
+                    self.token_expires = time.time() + float(result.get("expires_in", 1799))
+                    return self.token
+            except urllib.error.HTTPError as e:
+                body = e.read()
+                msg = AmadeusFlightSearch._parse_error_body(body)
+                ra_raw = e.headers.get("Retry-After")
+                ra: Optional[float] = None
+                if ra_raw:
+                    try:
+                        ra = float(ra_raw)
+                    except ValueError:
+                        pass
+                if e.code in (429, 503, 502, 504) or e.code >= 500:
+                    _log.warning("Amadeus OAuth HTTP %s (attempt %s): %s", e.code, attempt + 1, msg)
+                    if attempt < 4:
+                        self._sleep_backoff(attempt, ra)
+                        continue
+                _log.error("Amadeus OAuth 失败 HTTP %s: %s", e.code, msg)
+                raise RuntimeError(f"Amadeus OAuth ({e.code}): {msg}") from None
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                _log.warning("Amadeus OAuth 网络错误 (attempt %s): %s", attempt + 1, e)
+                if attempt < 4:
+                    self._sleep_backoff(attempt, None)
+                    continue
+                raise RuntimeError(f"Amadeus OAuth 网络失败: {e}") from e
+        raise RuntimeError("Amadeus OAuth 重试耗尽")
 
-        self.token = result["access_token"]
-        self.token_expires = time.time() + result.get("expires_in", 1799)
-        return self.token
-
-    def _api_get(self, path: str, params: dict) -> dict:
-        import urllib.request
-        import urllib.parse
-
-        token = self._get_token()
+    def _api_get(self, path: str, params: dict[str, Any]) -> dict:
+        """GET JSON；401 时刷新 token 后重试；429/5xx 退避。"""
         query = urllib.parse.urlencode(params)
-        url = f"{self.BASE_URL}{path}?{query}"
+        url = f"{self.base_url}{path}?{query}"
 
-        req = urllib.request.Request(url, headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-        })
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
+        for auth_round in range(3):
+            token = self._fetch_oauth_token()
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                },
+            )
+            for attempt in range(6):
+                try:
+                    with urllib.request.urlopen(req, timeout=45) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
+                except urllib.error.HTTPError as e:
+                    body = e.read()
+                    msg = self._parse_error_body(body)
+                    ra_raw = e.headers.get("Retry-After")
+                    ra: Optional[float] = None
+                    if ra_raw:
+                        try:
+                            ra = float(ra_raw)
+                        except ValueError:
+                            pass
+                    if e.code == 401:
+                        _log.warning("Amadeus token 失效，刷新后重试")
+                        self._invalidate_token()
+                        break
+                    if e.code == 429 or e.code >= 500:
+                        _log.warning(
+                            "Amadeus GET %s HTTP %s (attempt %s): %s",
+                            path,
+                            e.code,
+                            attempt + 1,
+                            msg,
+                        )
+                        if attempt < 5:
+                            self._sleep_backoff(attempt, ra)
+                            continue
+                        raise RuntimeError(f"{e.code}: {msg}") from None
+                    _log.warning("Amadeus GET %s HTTP %s: %s", path, e.code, msg)
+                    raise RuntimeError(f"{e.code}: {msg}") from None
+                except (urllib.error.URLError, TimeoutError, OSError) as e:
+                    _log.warning("Amadeus GET 网络错误 (attempt %s): %s", attempt + 1, e)
+                    if attempt < 5:
+                        self._sleep_backoff(attempt, None)
+                        continue
+                    raise RuntimeError(str(e)) from e
+        raise RuntimeError("Amadeus GET 认证重试耗尽")
+
+    def _get_token(self) -> str:
+        return self._fetch_oauth_token()
 
     def search_round_trip(
         self,
@@ -185,7 +296,7 @@ class AmadeusFlightSearch:
         try:
             data = self._api_get("/v2/shopping/flight-offers", params)
         except Exception as e:
-            print(f"  [!] API 请求失败 ({depart_date} -> {return_date}): {e}")
+            _log.warning("航班报价请求失败 %s → %s: %s", depart_date, return_date, e)
             return []
 
         results = []
@@ -453,6 +564,35 @@ def save_results(results: list[FlightOption], filepath: str):
     print(f"  结果已保存到: {filepath}")
 
 
+def dedupe_flight_options(results: list[FlightOption]) -> list[FlightOption]:
+    """去掉完全相同的报价行（同日同价同摘要），保留低价排序后的第一条。"""
+    seen: set[tuple[Any, ...]] = set()
+    out: list[FlightOption] = []
+    for opt in sorted(results, key=lambda x: (x.total_price, x.outbound_date)):
+        key = (
+            opt.outbound_date,
+            opt.return_date,
+            round(opt.total_price, 2),
+            opt.currency,
+            opt.outbound_summary,
+            opt.return_summary,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(opt)
+    return out
+
+
+def _configure_cli_logging() -> None:
+    if logging.root.handlers:
+        return
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+
 # ─── 主搜索逻辑 ──────────────────────────────────────────────────────────────
 
 def count_departure_dates(
@@ -481,12 +621,17 @@ def scan_dates(
     cabin: str = "",
     results_per_date: int = 5,
     verbose: bool = True,
-    request_delay_sec: float = 0.15,
+    request_delay_sec: Optional[float] = None,
 ) -> list[FlightOption]:
     """扫描日期范围内所有可能的出发日期。
 
     verbose=False 时不写 stdout（供飞书后台线程调用）；进度写入 logging。
     """
+    delay_sec = (
+        max(0.05, float(request_delay_sec))
+        if request_delay_sec is not None
+        else get_request_delay_sec()
+    )
     all_results: list[FlightOption] = []
     current = start_date
     dates_to_scan: list[datetime] = []
@@ -542,7 +687,7 @@ def scan_dates(
                 for dt in dates_to_scan:
                     all_results.extend(_one_day(dt))
                     progress.update(task, advance=1)
-                    time.sleep(request_delay_sec)
+                    time.sleep(delay_sec)
         except ImportError:
             for i, dt in enumerate(dates_to_scan, 1):
                 pct = i / total * 100
@@ -550,7 +695,7 @@ def scan_dates(
                 ret = (dt + timedelta(days=trip_days)).strftime("%Y-%m-%d")
                 print(f"\r  [{pct:5.1f}%] 搜索 {depart} -> {ret} ...", end="", flush=True)
                 all_results.extend(_one_day(dt))
-                time.sleep(request_delay_sec)
+                time.sleep(delay_sec)
             print()
     else:
         log_every = max(1, total // 10)
@@ -558,7 +703,7 @@ def scan_dates(
             all_results.extend(_one_day(dt))
             if i == 1 or i % log_every == 0 or i == total:
                 _log.debug("航班扫描进度 %s/%s (%s)", i, total, dt.strftime("%Y-%m-%d"))
-            time.sleep(request_delay_sec)
+            time.sleep(delay_sec)
 
     return all_results
 
@@ -609,6 +754,8 @@ def resolve_airport(name: str) -> str:
 
 def main():
     load_env()
+    ensure_windows_utf8_stdio()
+    _configure_cli_logging()
 
     parser = argparse.ArgumentParser(
         description="机票价格监控工具 - 搜索最便宜的往返机票",
@@ -696,6 +843,7 @@ def main():
             cabin=args.cabin,
         )
 
+    all_results = dedupe_flight_options(all_results)
     if not all_results:
         print("  未找到任何航班，请尝试调整搜索条件。")
         sys.exit(0)

@@ -19,7 +19,16 @@
 pip install -r requirements.txt
 ```
 
+运行单元测试（可选）：
+
+```bash
+pip install pytest
+python -m pytest tests/ -q
+```
+
 将 `.env.example` 复制为 `.env` 并填写飞书与（可选）Amadeus 凭证。程序启动时会通过 `python-dotenv` 自动加载项目目录下的 `.env`。
+
+**运维相关环境变量**：`AMADEUS_REQUEST_DELAY`（请求间隔，默认 0.15）、`BOT_MAX_CONCURRENT_SEARCHES`（机器人并发搜索数，默认 2）。
 
 ### 2. 命令行使用
 

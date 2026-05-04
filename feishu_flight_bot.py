@@ -50,6 +50,8 @@ from flight_monitor import (
     AmadeusFlightSearch,
     FlightOption,
     count_departure_dates,
+    dedupe_flight_options,
+    ensure_windows_utf8_stdio,
     generate_demo_data,
     load_env,
     resolve_airport,
@@ -81,6 +83,21 @@ class BotConfig:
 
 
 CFG = BotConfig()
+
+_SEARCH_SEM: Optional[threading.BoundedSemaphore] = None
+
+
+def _search_slot_acquire() -> bool:
+    global _SEARCH_SEM
+    if _SEARCH_SEM is None:
+        n = max(1, min(32, int(os.environ.get("BOT_MAX_CONCURRENT_SEARCHES", "2"))))
+        _SEARCH_SEM = threading.BoundedSemaphore(n)
+    return _SEARCH_SEM.acquire(blocking=False)
+
+
+def _search_slot_release() -> None:
+    if _SEARCH_SEM is not None:
+        _SEARCH_SEM.release()
 
 
 # ─── IATA 名称映射 ───────────────────────────────────────────────────────────
@@ -362,7 +379,7 @@ def run_search(
         raise ValueError("未设置 AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET 环境变量")
 
     searcher = AmadeusFlightSearch(client_id, client_secret, production=prod)
-    return scan_dates(
+    raw = scan_dates(
         searcher,
         origin,
         dest,
@@ -375,6 +392,7 @@ def run_search(
         results_per_date=per_date,
         verbose=False,
     )
+    return dedupe_flight_options(raw)
 
 
 # ─── 飞书消息发送 ────────────────────────────────────────────────────────────
@@ -451,6 +469,8 @@ def background_search(chat_id: str, message_id: str, chat_type: str, params: dic
     except Exception as e:
         log.exception("搜索失败")
         card = build_error_card(f"搜索失败: {e}")
+    finally:
+        _search_slot_release()
 
     send_card(chat_id, card)
 
@@ -495,13 +515,25 @@ def on_message_receive(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
                 reply_card(message_id, build_help_card())
             return
 
-        # 先回复"搜索中"，搜索是耗时操作，避免3秒超时
-        if chat_type == "p2p":
-            send_card(chat_id, build_searching_card(params))
-        else:
-            reply_card(message_id, build_searching_card(params))
+        if not _search_slot_acquire():
+            busy = build_error_card(
+                "当前后台搜索任务较多，请稍候一两分钟再试。"
+            )
+            if chat_type == "p2p":
+                send_card(chat_id, busy)
+            else:
+                reply_card(message_id, busy)
+            return
 
-        # 后台线程执行搜索
+        try:
+            if chat_type == "p2p":
+                send_card(chat_id, build_searching_card(params))
+            else:
+                reply_card(message_id, build_searching_card(params))
+        except Exception:
+            _search_slot_release()
+            raise
+
         t = threading.Thread(
             target=background_search,
             args=(chat_id, message_id, chat_type, params),
@@ -582,6 +614,7 @@ def start_bot(
 
 def main():
     load_env()
+    ensure_windows_utf8_stdio()
 
     parser = argparse.ArgumentParser(
         description="飞书机票监控机器人 (WebSocket 长连接版)",

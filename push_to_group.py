@@ -10,7 +10,7 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from flight_monitor import load_env
+from flight_monitor import ensure_windows_utf8_stdio, load_env
 
 from feishu_flight_bot import (
     build_flight_card,
@@ -22,6 +22,7 @@ from feishu_flight_bot import (
 
 def main() -> None:
     load_env()
+    ensure_windows_utf8_stdio()
 
     p = argparse.ArgumentParser(description="搜索机票并推送到飞书 Webhook")
     p.add_argument("--origin", default=os.environ.get("PUSH_ORIGIN", "香港"))
