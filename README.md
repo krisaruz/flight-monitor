@@ -19,6 +19,8 @@
 pip install -r requirements.txt
 ```
 
+将 `.env.example` 复制为 `.env` 并填写飞书与（可选）Amadeus 凭证。程序启动时会通过 `python-dotenv` 自动加载项目目录下的 `.env`。
+
 ### 2. 命令行使用
 
 ```bash
@@ -35,15 +37,18 @@ python flight_monitor.py --demo --save results.json
 ### 3. 飞书机器人
 
 ```bash
-# 设置环境变量（或创建 .env 文件，参考 .env.example）
+# 凭证放在 .env，或直接 export / set
 set FEISHU_APP_ID=cli_xxxx
 set FEISHU_APP_SECRET=your_secret
 
-# 启动机器人（演示模式）
+# 启动机器人：若 .env 中未配置 Amadeus，会自动使用演示数据；配置了 Amadeus 则查真实票价
+python feishu_flight_bot.py
+
+# 显式仅用演示数据（即使配置了 Amadeus）
 python feishu_flight_bot.py --demo
 
-# 启动机器人（真实数据，需额外配置 Amadeus）
-python feishu_flight_bot.py
+# Amadeus 生产环境 + 每日最多 5 条报价
+python feishu_flight_bot.py --production --max-per-date 5
 ```
 
 在飞书中 @机器人 发送：
@@ -57,7 +62,7 @@ python feishu_flight_bot.py
 复制 `.env.example` 为 `.env` 并填入你的凭证：
 
 ```bash
-cp .env.example .env
+copy .env.example .env
 ```
 
 | 变量 | 必填 | 说明 |
@@ -90,7 +95,7 @@ cp .env.example .env
 | `feishu_flight_bot.py` | 飞书机器人：WebSocket 长连接 + 自然语言解析 + 卡片消息 |
 | `requirements.txt` | Python 依赖 |
 | `start_bot.bat` | Windows 守护启动脚本（崩溃自动重启） |
-| `push_to_group.bat` | 一次性搜索并推送结果到飞书群 |
+| `push_to_group.py` / `push_to_group.bat` | 一次性搜索并通过 Webhook 推送到飞书群 |
 | `install_autostart.bat` | 设置 Windows 开机自启 |
 | `.env.example` | 环境变量配置模板 |
 

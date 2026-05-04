@@ -20,12 +20,27 @@
 import argparse
 import io
 import json
+import logging
 import os
 import sys
 import time
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import Optional
+
+_log = logging.getLogger(__name__)
+
+
+def load_env() -> None:
+    """从项目目录及当前工作目录加载 `.env`（需安装 python-dotenv）。"""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    root = Path(__file__).resolve().parent
+    load_dotenv(root / ".env")
+    load_dotenv()
 
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -440,6 +455,20 @@ def save_results(results: list[FlightOption], filepath: str):
 
 # ─── 主搜索逻辑 ──────────────────────────────────────────────────────────────
 
+def count_departure_dates(
+    start_date: datetime,
+    end_date: datetime,
+    trip_days: int,
+) -> int:
+    """可扫描的出发日数量（出发日 + trip_days 需在 end_date 之前或当天）。"""
+    n = 0
+    current = start_date
+    while current + timedelta(days=trip_days) <= end_date:
+        n += 1
+        current += timedelta(days=1)
+    return n
+
+
 def scan_dates(
     searcher: AmadeusFlightSearch,
     origin: str,
@@ -451,56 +480,85 @@ def scan_dates(
     currency: str = "CNY",
     cabin: str = "",
     results_per_date: int = 5,
+    verbose: bool = True,
+    request_delay_sec: float = 0.15,
 ) -> list[FlightOption]:
-    """扫描日期范围内所有可能的出发日期"""
+    """扫描日期范围内所有可能的出发日期。
 
-    all_results = []
+    verbose=False 时不写 stdout（供飞书后台线程调用）；进度写入 logging。
+    """
+    all_results: list[FlightOption] = []
     current = start_date
-    dates_to_scan = []
+    dates_to_scan: list[datetime] = []
 
     while current + timedelta(days=trip_days) <= end_date:
         dates_to_scan.append(current)
         current += timedelta(days=1)
 
     total = len(dates_to_scan)
-    print(f"\n  扫描范围: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
-    print(f"  往返天数: {trip_days} 天")
-    print(f"  待扫描出发日期: {total} 个\n")
+    if verbose:
+        print(f"\n  扫描范围: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
+        print(f"  往返天数: {trip_days} 天")
+        print(f"  待扫描出发日期: {total} 个\n")
+    else:
+        _log.info(
+            "扫描 %s→%s，%s ~ %s，%s 天往返，共 %s 个出发日",
+            origin,
+            destination,
+            start_date.strftime("%Y-%m-%d"),
+            end_date.strftime("%Y-%m-%d"),
+            trip_days,
+            total,
+        )
 
-    try:
-        from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
-        with Progress(
-            TextColumn("[bold blue]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeRemainingColumn(),
-        ) as progress:
-            task = progress.add_task("搜索航班...", total=total)
-            for dt in dates_to_scan:
+    if total == 0:
+        return []
+
+    def _one_day(dt: datetime) -> list[FlightOption]:
+        depart = dt.strftime("%Y-%m-%d")
+        ret = (dt + timedelta(days=trip_days)).strftime("%Y-%m-%d")
+        return searcher.search_round_trip(
+            origin,
+            destination,
+            depart,
+            ret,
+            adults=adults,
+            currency=currency,
+            max_results=results_per_date,
+            cabin=cabin,
+        )
+
+    if verbose:
+        try:
+            from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
+
+            with Progress(
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeRemainingColumn(),
+            ) as progress:
+                task = progress.add_task("搜索航班...", total=total)
+                for dt in dates_to_scan:
+                    all_results.extend(_one_day(dt))
+                    progress.update(task, advance=1)
+                    time.sleep(request_delay_sec)
+        except ImportError:
+            for i, dt in enumerate(dates_to_scan, 1):
+                pct = i / total * 100
                 depart = dt.strftime("%Y-%m-%d")
                 ret = (dt + timedelta(days=trip_days)).strftime("%Y-%m-%d")
-                results = searcher.search_round_trip(
-                    origin, destination, depart, ret,
-                    adults=adults, currency=currency,
-                    max_results=results_per_date, cabin=cabin,
-                )
-                all_results.extend(results)
-                progress.update(task, advance=1)
-                time.sleep(0.15)
-    except ImportError:
+                print(f"\r  [{pct:5.1f}%] 搜索 {depart} -> {ret} ...", end="", flush=True)
+                all_results.extend(_one_day(dt))
+                time.sleep(request_delay_sec)
+            print()
+    else:
+        log_every = max(1, total // 10)
         for i, dt in enumerate(dates_to_scan, 1):
-            depart = dt.strftime("%Y-%m-%d")
-            ret = (dt + timedelta(days=trip_days)).strftime("%Y-%m-%d")
-            pct = i / total * 100
-            print(f"\r  [{pct:5.1f}%] 搜索 {depart} -> {ret} ...", end="", flush=True)
-            results = searcher.search_round_trip(
-                origin, destination, depart, ret,
-                adults=adults, currency=currency,
-                max_results=results_per_date, cabin=cabin,
-            )
-            all_results.extend(results)
-            time.sleep(0.15)
-        print()
+            all_results.extend(_one_day(dt))
+            if i == 1 or i % log_every == 0 or i == total:
+                _log.debug("航班扫描进度 %s/%s (%s)", i, total, dt.strftime("%Y-%m-%d"))
+            time.sleep(request_delay_sec)
 
     return all_results
 
@@ -550,6 +608,8 @@ def resolve_airport(name: str) -> str:
 
 
 def main():
+    load_env()
+
     parser = argparse.ArgumentParser(
         description="机票价格监控工具 - 搜索最便宜的往返机票",
         formatter_class=argparse.RawDescriptionHelpFormatter,

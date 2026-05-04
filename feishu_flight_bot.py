@@ -35,7 +35,7 @@ import os
 import re
 import sys
 import threading
-import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -46,8 +46,14 @@ from lark_oapi.api.im.v1 import (
 )
 
 from flight_monitor import (
-    FlightOption, AmadeusFlightSearch, generate_demo_data,
-    resolve_airport, AIRPORT_ALIASES,
+    AIRPORT_ALIASES,
+    AmadeusFlightSearch,
+    FlightOption,
+    count_departure_dates,
+    generate_demo_data,
+    load_env,
+    resolve_airport,
+    scan_dates,
 )
 
 # ─── 日志 ────────────────────────────────────────────────────────────────────
@@ -62,11 +68,17 @@ log = logging.getLogger("flight-bot")
 
 # ─── 全局配置 ─────────────────────────────────────────────────────────────────
 
+
+@dataclass
 class BotConfig:
     app_id: str = ""
     app_secret: str = ""
     use_demo: bool = False
+    amadeus_production: bool = False
+    max_results_per_date: int = 3
+    currency: str = "CNY"
     lark_client: Optional[lark.Client] = None
+
 
 CFG = BotConfig()
 
@@ -165,6 +177,21 @@ def build_help_card() -> dict:
 def build_searching_card(params: dict) -> dict:
     origin_name = _code_to_name(params["origin"])
     dest_name = _code_to_name(params["dest"])
+    try:
+        sd = datetime.strptime(params["start"], "%Y-%m-%d")
+        ed = datetime.strptime(params["end"], "%Y-%m-%d")
+        n_days = count_departure_dates(sd, ed, params["days"])
+    except (ValueError, KeyError):
+        n_days = 0
+    # 粗略估计：每出发日约 0.15s 间隔 + 网络与 API
+    low = max(8, int(n_days * 0.35)) if n_days else 10
+    high = max(low + 5, int(n_days * 1.4)) if n_days else 30
+    high = min(high, 900)
+    eta_line = (
+        f"需查询约 **{n_days}** 个出发日，预计 **{low}~{high}** 秒"
+        if n_days
+        else "正在扫描日期组合，请稍候…"
+    )
     return {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -174,7 +201,7 @@ def build_searching_card(params: dict) -> dict:
         "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": (
             f"**{origin_name} → {dest_name}**\n"
             f"日期: {params['start']} ~ {params['end']} | 行程: {params['days']}天\n\n"
-            f"正在扫描所有日期组合，请稍候约 10~30 秒..."
+            f"{eta_line}"
         )}}],
     }
 
@@ -307,13 +334,26 @@ def push_to_feishu_webhook(webhook_url: str, card: dict):
 
 # ─── 搜索执行 ────────────────────────────────────────────────────────────────
 
-def run_search(params: dict) -> list[FlightOption]:
+def run_search(
+    params: dict,
+    *,
+    use_demo: Optional[bool] = None,
+    amadeus_production: Optional[bool] = None,
+    max_results_per_date: Optional[int] = None,
+    currency: Optional[str] = None,
+) -> list[FlightOption]:
+    """执行扫描；可选参数覆盖全局 CFG（便于脚本/测试调用）。"""
     origin, dest = params["origin"], params["dest"]
     start_date = datetime.strptime(params["start"], "%Y-%m-%d")
     end_date = datetime.strptime(params["end"], "%Y-%m-%d")
     trip_days = params["days"]
 
-    if CFG.use_demo:
+    demo = CFG.use_demo if use_demo is None else use_demo
+    prod = CFG.amadeus_production if amadeus_production is None else amadeus_production
+    per_date = CFG.max_results_per_date if max_results_per_date is None else max_results_per_date
+    curr = CFG.currency if currency is None else currency
+
+    if demo:
         return generate_demo_data(origin, dest, start_date, end_date, trip_days)
 
     client_id = os.environ.get("AMADEUS_CLIENT_ID", "")
@@ -321,17 +361,20 @@ def run_search(params: dict) -> list[FlightOption]:
     if not client_id or not client_secret:
         raise ValueError("未设置 AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET 环境变量")
 
-    searcher = AmadeusFlightSearch(client_id, client_secret)
-    all_results = []
-    current = start_date
-    while current + timedelta(days=trip_days) <= end_date:
-        depart = current.strftime("%Y-%m-%d")
-        ret = (current + timedelta(days=trip_days)).strftime("%Y-%m-%d")
-        results = searcher.search_round_trip(origin, dest, depart, ret, max_results=3)
-        all_results.extend(results)
-        current += timedelta(days=1)
-        time.sleep(0.15)
-    return all_results
+    searcher = AmadeusFlightSearch(client_id, client_secret, production=prod)
+    return scan_dates(
+        searcher,
+        origin,
+        dest,
+        start_date,
+        end_date,
+        trip_days,
+        adults=1,
+        currency=curr,
+        cabin="",
+        results_per_date=per_date,
+        verbose=False,
+    )
 
 
 # ─── 飞书消息发送 ────────────────────────────────────────────────────────────
@@ -472,10 +515,21 @@ def on_message_receive(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
 
 # ─── 启动入口 ────────────────────────────────────────────────────────────────
 
-def start_bot(app_id: str, app_secret: str, use_demo: bool = False, log_level: str = "INFO"):
+def start_bot(
+    app_id: str,
+    app_secret: str,
+    use_demo: bool = False,
+    amadeus_production: bool = False,
+    max_results_per_date: int = 3,
+    currency: str = "CNY",
+    log_level: str = "INFO",
+):
     CFG.app_id = app_id
     CFG.app_secret = app_secret
     CFG.use_demo = use_demo
+    CFG.amadeus_production = amadeus_production
+    CFG.max_results_per_date = max_results_per_date
+    CFG.currency = currency
 
     CFG.lark_client = (
         lark.Client.builder()
@@ -492,6 +546,10 @@ def start_bot(app_id: str, app_secret: str, use_demo: bool = False, log_level: s
 
     lark_log = lark.LogLevel.DEBUG if log_level == "DEBUG" else lark.LogLevel.INFO
 
+    _lvl_map = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING}
+    _lvl = _lvl_map.get(log_level, logging.INFO)
+    logging.getLogger("flight_monitor").setLevel(_lvl)
+
     ws_client = lark.ws.Client(
         app_id,
         app_secret,
@@ -499,13 +557,17 @@ def start_bot(app_id: str, app_secret: str, use_demo: bool = False, log_level: s
         log_level=lark_log,
     )
 
+    data_src = "演示数据 (--demo)" if use_demo else (
+        f"Amadeus API ({'生产' if amadeus_production else '测试'}环境)"
+    )
     print(f"""
 =========================================
   飞书机票监控机器人 (WebSocket 长连接)
 =========================================
 
   App ID:  {app_id[:10]}...
-  数据源:  {'演示数据 (--demo)' if use_demo else 'Amadeus API'}
+  数据源:  {data_src}
+  每日报价条数: {max_results_per_date}  货币: {currency}
   日志级别: {log_level}
 
   机器人已启动！在飞书中 @机器人 发送:
@@ -519,6 +581,8 @@ def start_bot(app_id: str, app_secret: str, use_demo: bool = False, log_level: s
 
 
 def main():
+    load_env()
+
     parser = argparse.ArgumentParser(
         description="飞书机票监控机器人 (WebSocket 长连接版)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -548,6 +612,23 @@ def main():
     parser.add_argument("--app-id", default="", help="飞书 App ID")
     parser.add_argument("--app-secret", default="", help="飞书 App Secret")
     parser.add_argument("--demo", action="store_true", help="使用演示数据，不需要 Amadeus 密钥")
+    parser.add_argument(
+        "--production",
+        action="store_true",
+        help="Amadeus 使用生产环境 api.amadeus.com（默认测试环境）",
+    )
+    parser.add_argument(
+        "--max-per-date",
+        type=int,
+        default=3,
+        metavar="N",
+        help="每个出发日最多拉取几条报价 (默认: 3)",
+    )
+    parser.add_argument(
+        "--currency",
+        default=os.environ.get("AMADEUS_CURRENCY", "CNY"),
+        help="报价货币代码 (默认: CNY，可由环境变量 AMADEUS_CURRENCY 覆盖)",
+    )
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING"])
 
     args = parser.parse_args()
@@ -585,7 +666,22 @@ def main():
 """)
         sys.exit(1)
 
-    start_bot(app_id, app_secret, use_demo=args.demo, log_level=args.log_level)
+    cid = os.environ.get("AMADEUS_CLIENT_ID", "").strip()
+    csec = os.environ.get("AMADEUS_CLIENT_SECRET", "").strip()
+    if args.demo:
+        use_demo = True
+    else:
+        use_demo = not (bool(cid) and bool(csec))
+
+    start_bot(
+        app_id,
+        app_secret,
+        use_demo=use_demo,
+        amadeus_production=args.production,
+        max_results_per_date=max(1, args.max_per_date),
+        currency=args.currency.strip().upper() or "CNY",
+        log_level=args.log_level,
+    )
 
 
 if __name__ == "__main__":
