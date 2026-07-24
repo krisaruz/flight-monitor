@@ -4,28 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flight-monitor"
-version = "0.3.0"
-description = "Round-trip flight price scan (Amadeus) + Feishu bot"
+version = "2.0.0"
+description = "Fuzzy date-window round-trip flight watcher (Travelpayouts + OTA verify + FastAPI + React)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = [
-  "rich>=13.0",
-  "lark-oapi>=1.4.0",
-  "python-dotenv>=1.0.0",
-]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
-
-[tool.setuptools]
-py-modules = [
-  "flight_monitor",
-  "feishu_flight_bot",
-  "push_to_group",
-]
+dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["backend"]
 addopts = "-q"

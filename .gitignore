@@ -7,12 +7,14 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
+.pytest_cache/
 dist/
 build/
 
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 
@@ -20,11 +22,19 @@ build/
 Thumbs.db
 .DS_Store
 
-# Debug/diag scripts
+# Local DB / runtime
+data/
+*.log
+results.json
+
+# Frontend build artifacts (Docker / `npm run build` writes into backend/static)
+frontend/node_modules/
+frontend/dist/
+backend/static/
+
+# Ad-hoc debug leftovers
 _diag*.py
 _debug*.py
 _check*.py
-
-# Project outputs
-results.json
-*.log
+_probe*.py
+_e2e*.py
