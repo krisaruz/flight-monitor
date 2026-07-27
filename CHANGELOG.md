@@ -9,6 +9,49 @@
 
 ---
 
+## 2026-07-27
+
+### Removed
+
+- 本地过程产物：Story Nav 迭代截图（`backups/`、`frontend/backups/`）、仓库内 agent skill 缓存（`.agents/`、`skills-lock.json`）；并写入 `.gitignore` 防止再入库。
+
+### Changed
+
+- **Story Nav 文案定稿（软安心）**：采用用户选定组合——「行程还在酝酿，完全正常」「大概那两周就可以开工」「最合适的机场也不用你先猜」「找到了再确认是真价」「设好区间先去做别的事」「一点点意向就够出发」；CTA「帮我盯着」。卖点：模糊区间 + 出行想法 → 盯最便宜那一程。
+- **Story Nav 文案对齐卖点 / 口语重写**：叙事主轴为模糊区间与出行意向（承接上条定稿）。
+- **Story Nav 全文中文**：分镜标题、副文、按钮、核验状态、通知、下滑提示与进度点文案改为中文（品牌/OTA 专名保留）。
+- **Story Nav 分镜差异化**：每幕独立主题色与舞台质感（日期暖绿 / 日期窗青绿图表 / 机场琥珀卡 / 核验终端绿 / 通知冷蓝 / 终幕高对比），并随幕切换背景氛围，避免六幕同一模板感。
+- **Story Nav 统一栅格重排**：参考 Linear/Raycast 产品段，全部分镜共用居中 max-width 外框与 gutter；`rail | stage` 顶对齐；舞台保留最小高度（修复机场等矮组件悬浮错位）；Hero 为 stage|rail 翻转；终幕同外框。
+- **Story Nav 编辑式排版**：编号 eyebrow + Playfair 斜体强调 + mono 注解；通知手机框；slate 底 + 环境光。
+- **Story Nav 视觉加厚**：机场幕「国家卡片 → 机场网格」；终幕能力复述与次级 Sign in。
+- **Story Nav Premium 电影感**：轻滚动视差、景深入场、stagger、玻璃通知层；PRD 允许克制视差/景深；`prefers-reduced-motion` 关闭循环与景深。
+- **Story Nav 动效质量**：分意图缓动；Hero 加权比较；拖拽零延迟；核验参差时序；下滑提示有限次后静止；分镜 `content-visibility` / IO `once`。
+
+### Added
+
+- **电影式公开导航页（Story Nav）**：未登录访问 `/` 进入滚动分镜交互演示（日历选日、拖日期窗、点国家展开机场、OTA 核验仪表、触价通知、最终 CTA），用动画解释「自动找到最便宜出行日期」；已登录 `/` 仍为任务板。CTA / Sign in → `/login`。演示数据仅为教学示意。
+- **Story Nav 动效与引导**：价格翻牌、日历扫描/定格、分镜入场与侧边进度点；首屏底部下滑提示（滚动后淡出）。
+- **Story Nav Hero 修复**：主标题（h1）立即可见；比较→定格与洞察同帧；约 2.4s 内出单一主 CTA；Lowest 文字标签 + aria-live；Skip animation；示意价声明；下滑提示在主 CTA 出现前引导、出现后收敛。
+- **OTA 核验多源回落**：Playwright 顺序改为 **携程 → 去哪儿 → 飞猪 → Google Flights**；任一家解析到真价即写入 `verified_price`（`source` 分别为 `CtripVerified` / `QunarVerified` / `FliggyVerified` / `GoogleFlightsVerified`）。
+- 飞猪往返深链生成：`fliggy_round_trip_url`（结果页/核验共用城市码）。
+- 配置项 `OTA_VERIFY_HEADLESS`（默认 `true`）：改为 `false` 时用有头 Chrome/Chromium，部分环境可降低反爬命中（会弹窗）。
+
+### Changed
+
+- **携程核验抗干扰**：去掉 `--enable-automation`、加强 stealth 脚本、`Asia/Shanghai` 时区、先访问航班首页暖场再进列表、轻量鼠标滚动；硬拦截时本轮跳过该源。
+- OTA 价解析：下限 ¥450，优先接口 JSON 价，拒绝营销条噪声；单源导航异常不再中断整条回落链。
+- **PRD v1.4**：同步多平台核验顺序与反爬预期（不承诺单源零拦截）。
+
+---
+
+## 2026-07-26
+
+### Changed
+
+- **PRD v1.3**：补全权威产品链路说明——Travelpayouts 缓存发现与 Playwright 核验分阶段职责；明确携程与 Google Flights **均由 Playwright 打开页面**（无独立 Google API）；核验池、双价语义（缓存仅对照、排序用核验价）、WhaleGuard 后 Google 回落为正式路径、时序图、API/数据摘要与验收细则。便于对照实现与排障，无运行时行为变更。
+
+---
+
 ## 2026-07-24
 
 ### Added

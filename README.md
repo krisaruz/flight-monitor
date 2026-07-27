@@ -9,7 +9,7 @@
 ```
 日期窗任务
   → Travelpayouts 免费缓存价（发现候选）
-  → Playwright OTA 核验（优先携程，WhaleGuard 则 Google Flights）
+  → Playwright OTA 核验（携程 → 去哪儿 → 飞猪 → Google Flights）
   → 按核验价排序 Top-10+
   → 可选飞书 Webhook 告警
 ```

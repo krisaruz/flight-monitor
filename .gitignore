@@ -38,3 +38,9 @@ _debug*.py
 _check*.py
 _probe*.py
 _e2e*.py
+
+# Local iteration artifacts (screenshots / agent skill cache)
+backups/
+frontend/backups/
+.agents/
+skills-lock.json

@@ -97,7 +97,7 @@
 
 ### 产品硬约束
 
-- 查价免费；管线：Travelpayouts → Playwright（先携程，失败则 Google Flights）→ **核验价**排序。  
+- 查价免费；管线：Travelpayouts → Playwright（携程 → 去哪儿 → 飞猪 → Google Flights）→ **核验价**排序。  
 - 禁止 mock / 演示价 / 深链板冒充成功。  
 - 盯价 = 重复同一扫价核心。  
 - 「国家 · 不限机场」必须扩展多机场 codes 真扫。  

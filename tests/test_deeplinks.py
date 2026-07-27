@@ -23,6 +23,18 @@ def test_is_likely_international() -> None:
     assert is_likely_international("PVG", "PEK") is False
 
 
+def test_fliggy_url() -> None:
+    from app.services.deeplinks import fliggy_round_trip_url
+
+    f = fliggy_round_trip_url("PEK", "SHA", "2026-05-01", "2026-05-05")
+    assert "fliggy.com" in f
+    assert "tripType=1" in f
+    assert "depCityCode=BJS" in f or "depCity=BJS" in f
+    assert "arrCityCode=SHA" in f or "arrCity=SHA" in f
+    assert "depDate=2026-05-01" in f
+    assert "arrDate=2026-05-05" in f
+
+
 def test_ctrip_and_qunar_urls() -> None:
     c = ctrip_round_trip_url("HKG", "KIX", "2026-11-25", "2026-11-30")
     assert "ctrip.com" in c
@@ -32,7 +44,9 @@ def test_ctrip_and_qunar_urls() -> None:
     assert "arrdate=" not in c
     q = qunar_round_trip_url("SHA", "BJS", "2026-05-01", "2026-05-05")
     assert "flight.qunar.com" in q
-    assert "searchType=roundTrip" in q
+    assert "roundtrip_list.htm" in q
+    assert "fromCode=SHA" in q
+    assert "toCode=BJS" in q
     assert "2026-05-01" in q
     assert "2026-05-05" in q
     # 中文城市名（URL 编码后仍可还原）

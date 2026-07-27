@@ -186,12 +186,39 @@ def ctrip_round_trip_url(origin: str, dest: str, outbound: str, ret: str, adults
 
 
 def qunar_round_trip_url(origin: str, dest: str, outbound: str, ret: str) -> str:
-    """去哪儿官网带参首页（旧 round_list.htm 已跳转 Error404）。"""
+    """去哪儿往返列表页（旧 round_list.htm 已 404；首页带参常不触发搜价）。"""
+    o_cn, d_cn = city_display_name(origin), city_display_name(dest)
+    from_code = ctrip_city_code(origin).upper()
+    to_code = ctrip_city_code(dest).upper()
+    return (
+        "https://flight.qunar.com/site/roundtrip_list.htm?"
+        f"searchDepartureAirport={quote(o_cn)}&searchArrivalAirport={quote(d_cn)}"
+        f"&searchDepartureTime={outbound}&searchArrivalTime={ret}"
+        f"&nextNDays=0&startSearch=true&fromCode={from_code}&toCode={to_code}"
+        f"&from=flight_home_search&lowestPrice=null"
+    )
+
+
+def fliggy_city_code(place: str) -> str:
+    """飞猪常用大写城市码（与携程城市码同系：PEK→BJS、PVG→SHA）。"""
+    return ctrip_city_code(place).upper()
+
+
+def fliggy_round_trip_url(
+    origin: str,
+    dest: str,
+    outbound: str,
+    ret: str,
+    adults: int = 1,
+) -> str:
+    """飞猪机票搜索（往返）。优先 www 入口，sjipiao 子域在部分网络会被重置。"""
+    o, d = fliggy_city_code(origin), fliggy_city_code(dest)
     o_cn, d_cn = city_display_name(origin), city_display_name(dest)
     return (
-        "https://flight.qunar.com/?"
-        f"fromCity={quote(o_cn)}&toCity={quote(d_cn)}"
-        f"&fromDate={outbound}&toDate={ret}&searchType=roundTrip"
+        "https://www.fliggy.com/flight/search?"
+        f"tripType=1&depCityCode={o}&arrCityCode={d}"
+        f"&depCityName={quote(o_cn)}&arrCityName={quote(d_cn)}"
+        f"&depDate={outbound}&arrDate={ret}&adultNum={adults}&childNum=0"
     )
 
 
@@ -205,6 +232,7 @@ def build_verify_links(
     return {
         "ctrip": ctrip_round_trip_url(origin, dest, outbound, ret, adults=adults),
         "qunar": qunar_round_trip_url(origin, dest, outbound, ret),
+        "fliggy": fliggy_round_trip_url(origin, dest, outbound, ret, adults=adults),
         "google": google_flights_url(origin, dest, outbound, ret, adults=adults),
     }
 

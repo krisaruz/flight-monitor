@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Navigate, NavLink, Outlet, Route, Routes, useLocation } from 'react-router-dom'
 import { api, type Health } from './api'
 import { AuthProvider, useAuth } from './AuthContext'
@@ -6,6 +6,7 @@ import Icon from './components/Icon'
 import Admin from './pages/Admin'
 import Login from './pages/Login'
 import Settings from './pages/Settings'
+import StoryNav from './pages/StoryNav'
 import TaskDetail from './pages/TaskDetail'
 import Tasks from './pages/Tasks'
 
@@ -17,8 +18,8 @@ function providerLabel(h: Health | null) {
   return '未就绪'
 }
 
-function Shell() {
-  const { user, loading, logout } = useAuth()
+function ShellFrame({ children }: { children: ReactNode }) {
+  const { user, logout } = useAuth()
   const [health, setHealth] = useState<Health | null>(null)
   const location = useLocation()
 
@@ -26,8 +27,7 @@ function Shell() {
     void api.health().then(setHealth).catch(() => setHealth(null))
   }, [])
 
-  if (loading) return <div className="center-page"><span className="chip">加载中…</span></div>
-  if (!user) return <Navigate to="/login" replace />
+  if (!user) return null
 
   return (
     <div className="layout">
@@ -54,9 +54,43 @@ function Shell() {
         </div>
       </header>
       <main key={location.pathname} className="page-enter">
-        <Outlet />
+        {children}
       </main>
     </div>
+  )
+}
+
+/** 已登录工作区：未登录踢去登录页 */
+function Shell() {
+  const { user, loading } = useAuth()
+
+  if (loading) return <div className="center-page"><span className="chip">加载中…</span></div>
+  if (!user) return <Navigate to="/login" replace />
+
+  return (
+    <ShellFrame>
+      <Outlet />
+    </ShellFrame>
+  )
+}
+
+/** `/`：访客看交互演示导航；登录用户看任务板 */
+function RootHome() {
+  const { user, loading } = useAuth()
+
+  if (loading) {
+    return (
+      <div className="story-boot" aria-busy="true">
+        <span className="story-boot-mark">Gatefare</span>
+      </div>
+    )
+  }
+  if (!user) return <StoryNav />
+
+  return (
+    <ShellFrame>
+      <Tasks />
+    </ShellFrame>
   )
 }
 
@@ -65,8 +99,8 @@ export default function App() {
     <AuthProvider>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/" element={<RootHome />} />
         <Route element={<Shell />}>
-          <Route path="/" element={<Tasks />} />
           <Route path="/tasks/:id" element={<TaskDetail />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/admin" element={<Admin />} />

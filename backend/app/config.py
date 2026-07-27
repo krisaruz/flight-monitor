@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     verify_top_k: int = 20
     ctrip_verify_timeout_ms: int = 45000
     ctrip_verify_delay_sec: float = 1.5
+    # OTA 核验是否无头；false 时弹出本机 Chrome/Chromium，部分环境可降低 WhaleGuard 命中
+    ota_verify_headless: bool = True
     # 仅测试夹具可设 true；生产扫价一律拒绝
     use_demo: bool = False
 
@@ -80,5 +82,5 @@ def health_hint() -> str:
         return f"缺少 TRAVELPAYOUTS_TOKEN。{TOKEN_HINT}"
     return (
         "混合管线：Travelpayouts 缓存价扫窗排序 → Playwright 核验真价"
-        "（优先携程，失败则 Google Flights）。推荐最低价以核验价为准。"
+        "（携程→去哪儿→飞猪→Google Flights）。推荐最低价以核验价为准。"
     )

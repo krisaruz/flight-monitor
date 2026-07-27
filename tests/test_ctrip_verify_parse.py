@@ -9,10 +9,12 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 from app.services.ctrip_verify import (
+    _is_blocked_page,
     extract_prices_from_json,
     extract_prices_from_text,
     parse_google_outbound_cards,
     pick_lowest,
+    pick_ota_price,
 )
 
 
@@ -42,6 +44,19 @@ def test_extract_prices_from_json_nested() -> None:
 
 def test_pick_lowest_empty() -> None:
     assert pick_lowest([]) is None
+
+
+def test_is_blocked_page_whaleguard() -> None:
+    assert _is_blocked_page("WhaleGuard block page")
+    assert _is_blocked_page("请完成安全验证后继续")
+    assert not _is_blocked_page("经济舱 ¥1288 起")
+
+
+def test_pick_ota_price_prefers_api_and_rejects_noise() -> None:
+    assert pick_ota_price([1288, 1560], [206, 99]) == 1288.0
+    # 仅噪声低价 / 单一可疑 DOM 价 → 拒绝
+    assert pick_ota_price([], [206, 206]) is None
+    assert pick_ota_price([], [999, 1100, 1200]) == 999.0
 
 
 def test_parse_google_outbound_cards() -> None:
