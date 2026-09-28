@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
@@ -11,18 +12,26 @@ from sqlalchemy.orm import Session, joinedload
 from app.config import require_pipeline_ready, settings
 from app.database import SessionLocal, engine
 from app.models import FlightResult, ScanRun, WatchTask
-from app.services.ctrip_verify import playwright_available, verify_candidates
-from app.services.deeplinks import build_verify_links
+from app.services.ctrip_verify import (
+    playwright_available,
+    scrape_google_one_way_days,
+    verify_candidates,
+)
+from app.services.deeplinks import build_verify_links, is_likely_international
 from app.services.feishu_notify import build_price_alert_text, push_text_to_feishu_webhook
-from app.services.flight_search import dedupe_flight_options
 from app.services.places import expand_codes
+from app.services.calendar_match import (
+    candidate_pool_size,
+    count_calendar_days,
+    iter_day_strings,
+    outbound_day_range,
+    pick_days_for_google_fill,
+    return_day_range,
+    select_calendar_verify_pool,
+)
 from app.services.travelpayouts import (
     TravelpayoutsClient,
-    count_api_batches,
     ensure_verify_url,
-    iter_date_combos,
-    make_skeleton_option,
-    select_verify_pool,
 )
 
 _log = logging.getLogger(__name__)
@@ -30,9 +39,14 @@ _log = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=max(1, settings.max_concurrent_scans))
 _run_lock = threading.Lock()
 _active_task_ids: set[int] = set()
+_cancel_requested: set[int] = set()
 _schema_ready = False
 
-TERMINAL_STATUSES = frozenset({"done", "partial", "failed"})
+TERMINAL_STATUSES = frozenset({"done", "partial", "failed", "cancelled"})
+
+
+class ScanCancelled(Exception):
+    """用户请求终止当前扫描。"""
 
 
 def ensure_schema() -> None:
@@ -95,6 +109,31 @@ def _task_od_codes(task: WatchTask) -> tuple[list[str], list[str]]:
     return origins, dests
 
 
+def _empty_calendar_error(
+    out_hits: int,
+    out_days: int,
+    ret_hits: int,
+    ret_days: int,
+    matched: int,
+    *,
+    domestic: bool,
+) -> str:
+    """发现阶段无可核验候选时的用户可见错误（含日历统计）。"""
+    stats = (
+        f"去程有价 {int(out_hits)}/{int(out_days)}、"
+        f"回程有价 {int(ret_hits)}/{int(ret_days)}、匹配 {int(matched)}"
+    )
+    if domestic:
+        return (
+            f"日期窗内没有可核验的往返组合（{stats}）。"
+            "国内均匀日期直核验也未能生成候选；可稍后再试，或放宽日期窗/停留天数。"
+        )
+    return (
+        f"日期窗内没有「去程+回程都有日历价」的组合可核验（{stats}）。"
+        "可稍后再试，或放宽日期窗/停留天数。"
+    )
+
+
 def estimate_combinations(task: WatchTask) -> int:
     start = datetime.strptime(task.start_date, "%Y-%m-%d")
     end = datetime.strptime(task.end_date, "%Y-%m-%d")
@@ -103,11 +142,80 @@ def estimate_combinations(task: WatchTask) -> int:
         od_n = max(1, len(origins) * len(dests))
     except Exception:
         od_n = 1
-    discover = count_api_batches(start, end, task.stay_min, task.stay_max) * od_n
+    cal_days = count_calendar_days(start, end, task.stay_min, task.stay_max) * od_n
     target_n = max(10, min(max(1, task.top_n), settings.verify_top_k))
-    date_n = count_api_batches(start, end, task.stay_min, task.stay_max)
-    verify_k = min(max(date_n, date_n * min(3, od_n)), max(target_n * 2, target_n + 5, 20))
-    return discover + verify_k
+    day_max = max(0, int(getattr(settings, "calendar_google_day_max", 16) or 16))
+    cand_k = candidate_pool_size(
+        target_n, int(getattr(settings, "calendar_candidate_k", 20) or 20)
+    )
+    # 粗估：日历天数 + 每 OD 每方向最多 day_max 补洞 + Top 核验
+    return cal_days + day_max * 2 * od_n + cand_k
+
+
+def request_cancel_run(task_id: int, run_id: int) -> ScanRun:
+    """标记运行中的扫描为取消；工作线程在下一步检查点退出。"""
+    ensure_schema()
+    db = SessionLocal()
+    try:
+        run = (
+            db.query(ScanRun)
+            .filter(ScanRun.id == run_id, ScanRun.task_id == task_id)
+            .first()
+        )
+        if not run:
+            raise RuntimeError("扫描记录不存在")
+        if run.status in TERMINAL_STATUSES:
+            return run
+        if run.status not in {"pending", "running"}:
+            raise RuntimeError(f"当前状态不可取消: {run.status}")
+        with _run_lock:
+            _cancel_requested.add(run_id)
+        run.progress_message = "正在取消…"
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        return run
+    finally:
+        db.close()
+
+
+def _cancel_requested_for(run_id: int) -> bool:
+    with _run_lock:
+        return run_id in _cancel_requested
+
+
+def _clear_cancel(run_id: int) -> None:
+    with _run_lock:
+        _cancel_requested.discard(run_id)
+
+
+def _raise_if_cancelled(run_id: int) -> None:
+    if _cancel_requested_for(run_id):
+        raise ScanCancelled()
+
+
+def _finalize_cancelled(db: Session, run_id: int, task_id: int, note: str = "") -> None:
+    run = db.query(ScanRun).filter(ScanRun.id == run_id).first()
+    if not run:
+        return
+    if run.status in TERMINAL_STATUSES and run.status != "cancelled":
+        return
+    run.status = "cancelled"
+    run.phase = ""
+    run.error = (note or "用户取消")[:2000]
+    run.progress_message = "已取消"
+    run.finished_at = datetime.utcnow()
+    db.add(run)
+    task = db.query(WatchTask).filter(WatchTask.id == task_id).first()
+    if task:
+        task.last_run_at = run.finished_at
+        # 公开单次任务不自动排队；保留字段以免调度误触发
+        if task.enabled:
+            task.next_run_at = run.finished_at + timedelta(hours=max(1, task.interval_hours))
+        db.add(task)
+    db.commit()
+    _clear_cancel(run_id)
+    _log.info("扫描已取消 task=%s run=%s", task_id, run_id)
 
 
 def enqueue_scan(task_id: int, trigger: str = "manual") -> int:
@@ -185,6 +293,25 @@ def _set_progress(
         db.close()
 
 
+def _clean_leg_summary(text: str) -> str:
+    s = (text or "").strip()
+    if not s or s in {"N/A", "待核验", "见核对", "回程见核对链接"}:
+        return ""
+    if s.startswith("Google往返价"):
+        return ""
+    return s
+
+
+def _persist_leg_summaries(opt) -> tuple[str, str]:
+    out_sum = _clean_leg_summary(
+        getattr(opt, "summary_outbound", "") or getattr(opt, "outbound_summary", "")
+    )
+    ret_sum = _clean_leg_summary(
+        getattr(opt, "summary_return", "") or getattr(opt, "return_summary", "")
+    )
+    return out_sum, ret_sum
+
+
 def _persist_live_results(
     run_id: int,
     options: list,
@@ -203,6 +330,7 @@ def _persist_live_results(
         db.query(FlightResult).filter(FlightResult.run_id == run_id).delete()
         for i, opt in enumerate(ranked, 1):
             _attach_all_links(opt, origin, dest, adults)
+            out_sum, ret_sum = _persist_leg_summaries(opt)
             db.add(
                 FlightResult(
                     run_id=run_id,
@@ -215,8 +343,8 @@ def _persist_live_results(
                     verified_price=float(opt.verified_price) if opt.verified_price is not None else None,
                     verify_status=opt.verify_status or "ok",
                     currency=opt.currency or currency,
-                    outbound_summary=opt.outbound_summary,
-                    return_summary=opt.return_summary,
+                    outbound_summary=out_sum,
+                    return_summary=ret_sum,
                     booking_class=opt.booking_class,
                     source=opt.source or "OtaVerified",
                     verify_url=opt.verify_url or "",
@@ -255,7 +383,7 @@ def _run_scan_job(run_id: int, task_id: int) -> None:
         run.status = "running"
         run.phase = "discovering"
         run.error = ""
-        run.progress_message = "正在连接 Travelpayouts，准备扫日期窗…"
+        run.progress_message = "日历扫价：准备拉取去/回程按天最低价…"
         db.commit()
 
         origins, dests = _task_od_codes(task)
@@ -263,17 +391,23 @@ def _run_scan_job(run_id: int, task_id: int) -> None:
         dest = ",".join(dests)
         start = datetime.strptime(task.start_date, "%Y-%m-%d")
         end = datetime.strptime(task.end_date, "%Y-%m-%d")
-        combos = iter_date_combos(start, end, task.stay_min, task.stay_max)
         od_pairs = [(o, d) for o in origins for d in dests]
-        discover_total = max(1, len(combos) * len(od_pairs))
-        # 产品固定：展示核验价最低的 10 个航班（task.top_n 仅允许调高，默认/下限为 10）
         target_n = max(10, min(max(1, task.top_n), settings.verify_top_k))
-        # TP 缓存常稀疏：核验池放大，直到凑满 Top-N 成功条数
-        verify_attempts = min(
-            max(len(combos), len(combos) * min(3, len(dests))),
-            max(target_n * 2, target_n + 5, 20),
+        day_max = max(0, int(getattr(settings, "calendar_google_day_max", 16) or 16))
+        cand_k = candidate_pool_size(
+            target_n, int(getattr(settings, "calendar_candidate_k", 20) or 20)
         )
-        progress_total = discover_total + verify_attempts
+        refine_top = max(0, int(getattr(settings, "ctrip_h5_refine_top", 0) or 0))
+        budget_sec = max(120, int(getattr(settings, "verify_budget_sec", 720) or 720))
+
+        out0, out1 = outbound_day_range(start, end)
+        ret0, ret1 = return_day_range(start, end, task.stay_min, task.stay_max)
+        out_days = iter_day_strings(out0, out1)
+        ret_days = iter_day_strings(ret0, ret1)
+        cal_steps = max(1, (len(out_days) + len(ret_days)) * len(od_pairs))
+        fill_budget = day_max * 2 * len(od_pairs)
+        progress_total = cal_steps + fill_budget + cand_k + (refine_top if refine_top else 0)
+
         od_hint = f"{task.origin}→{task.dest}"
         if len(dests) > 1:
             od_hint += f"（{len(dests)} 个机场）"
@@ -282,7 +416,7 @@ def _run_scan_job(run_id: int, task_id: int) -> None:
             0,
             progress_total,
             "discovering",
-            f"发现阶段：扫 {discover_total} 步（{od_hint}）",
+            f"日历发现：{cal_steps} 天步（{od_hint}）",
         )
 
         client = TravelpayoutsClient(
@@ -291,131 +425,418 @@ def _run_scan_job(run_id: int, task_id: int) -> None:
             market=settings.travelpayouts_market,
         )
 
-        priced: list = []
+        all_candidates: list = []
         done_base = 0
-        for oi, (o_code, d_code) in enumerate(od_pairs):
+        g_delay = float(getattr(settings, "google_verify_delay_sec", 0.2) or 0.2)
+        budget_deadline = time.time() + budget_sec
+        # 日历诊断：供空候选错误文案 / 国内骨架回落决策
+        cal_out_hits = 0
+        cal_ret_hits = 0
+        cal_out_days_n = 0
+        cal_ret_days_n = 0
+        matched_n = 0
+        used_skeleton_pad = False
 
-            def on_discover(done: int, total: int, _base=done_base, _o=o_code, _d=d_code) -> None:
+        for oi, (o_code, d_code) in enumerate(od_pairs):
+            _raise_if_cancelled(run_id)
+
+            def on_out(done: int, total: int, _base=done_base, _o=o_code, _d=d_code) -> None:
+                _raise_if_cancelled(run_id)
                 _set_progress(
                     run_id,
                     _base + done,
                     progress_total,
                     "discovering",
-                    f"缓存扫窗 {_base + done}/{discover_total} · {_o}→{_d}",
+                    f"去程日历 {_base + done}/{cal_steps} · {_o}→{_d}",
+                )
+
+            def on_ret(done: int, total: int, _o=o_code, _d=d_code) -> None:
+                _raise_if_cancelled(run_id)
+                base = done_base + len(out_days)
+                _set_progress(
+                    run_id,
+                    base + done,
+                    progress_total,
+                    "discovering",
+                    f"回程日历 {base + done}/{cal_steps} · {_d}→{_o}",
                 )
 
             try:
-                priced.extend(
-                    client.scan_window(
-                        o_code,
-                        d_code,
-                        start,
-                        end,
-                        stay_min=task.stay_min,
-                        stay_max=task.stay_max,
-                        currency=task.currency,
-                        adults=task.adults,
-                        on_progress=on_discover,
-                        market=settings.travelpayouts_market,
-                    )
+                out_cal = client.scan_leg_calendar(
+                    o_code,
+                    d_code,
+                    out0,
+                    out1,
+                    currency=task.currency,
+                    on_progress=on_out,
                 )
+            except ScanCancelled:
+                raise
             except RuntimeError as e:
-                # 单机场「不可飞」不拖垮全国扫；网络/鉴权错误仍 fail-closed
                 msg = str(e)
                 if "not flightable" in msg or "unknown location" in msg or "HTTP 400" in msg:
-                    _log.warning("跳过不可用航线 %s→%s: %s", o_code, d_code, msg[:200])
-                    done_base += len(combos)
-                    _set_progress(
-                        run_id,
-                        done_base,
-                        progress_total,
-                        "discovering",
-                        f"跳过不可用机场 {o_code}→{d_code}，继续…",
-                    )
+                    _log.warning("跳过不可用航线(去程日历) %s→%s: %s", o_code, d_code, msg[:200])
+                    done_base += len(out_days) + len(ret_days)
                     continue
                 raise
-            done_base += len(combos)
 
-        priced = dedupe_flight_options(priced)
-        _log.info(
-            "TP 发现有价组合 %s / 日期组合 %s × OD %s（目标 Top-%s）",
-            len(priced),
-            len(combos),
-            len(od_pairs),
-            target_n,
+            try:
+                ret_cal = client.scan_leg_calendar(
+                    d_code,
+                    o_code,
+                    ret0,
+                    ret1,
+                    currency=task.currency,
+                    on_progress=on_ret,
+                )
+            except ScanCancelled:
+                raise
+            except RuntimeError as e:
+                msg = str(e)
+                if "not flightable" in msg or "unknown location" in msg or "HTTP 400" in msg:
+                    _log.warning("跳过不可用航线(回程日历) %s→%s: %s", d_code, o_code, msg[:200])
+                    done_base += len(out_days) + len(ret_days)
+                    continue
+                raise
+
+            done_base += len(out_days) + len(ret_days)
+            _raise_if_cancelled(run_id)
+
+            missing_out = [d for d in out_days if d not in out_cal]
+            missing_ret = [d for d in ret_days if d not in ret_cal]
+            cheap_out = sorted(out_cal, key=lambda d: out_cal[d])[:5]
+            cheap_ret = sorted(ret_cal, key=lambda d: ret_cal[d])[:5]
+            fill_out = pick_days_for_google_fill(missing_out, day_max, cheap_seeds=cheap_out)
+            fill_ret = pick_days_for_google_fill(missing_ret, day_max, cheap_seeds=cheap_ret)
+
+            fill_phase_base = cal_steps + oi * day_max * 2
+            if fill_out and time.time() < budget_deadline:
+                _set_progress(
+                    run_id,
+                    fill_phase_base,
+                    progress_total,
+                    "discovering",
+                    f"Google 单程补洞去程 {len(fill_out)} 天 · {o_code}→{d_code}",
+                )
+
+                def on_fill_out(done, total, day=None, price=None, _b=fill_phase_base):
+                    _set_progress(
+                        run_id,
+                        _b + done,
+                        progress_total,
+                        "discovering",
+                        f"去程补洞 {done}/{total}"
+                        + (f" · {day} ¥{int(price)}" if day and price else ""),
+                    )
+
+                try:
+                    got = scrape_google_one_way_days(
+                        o_code,
+                        d_code,
+                        fill_out,
+                        adults=task.adults,
+                        timeout_ms=settings.ctrip_verify_timeout_ms,
+                        delay_sec=max(0.2, g_delay),
+                        on_each=on_fill_out,
+                        should_stop=lambda: _cancel_requested_for(run_id),
+                        deadline_ts=budget_deadline,
+                    )
+                    out_cal.update(got)
+                except Exception as e:
+                    _log.warning("去程 Google 补洞失败 %s→%s: %s", o_code, d_code, e)
+
+            if fill_ret and time.time() < budget_deadline:
+                ret_fill_base = fill_phase_base + day_max
+                _set_progress(
+                    run_id,
+                    ret_fill_base,
+                    progress_total,
+                    "discovering",
+                    f"Google 单程补洞回程 {len(fill_ret)} 天 · {d_code}→{o_code}",
+                )
+
+                def on_fill_ret(done, total, day=None, price=None, _b=ret_fill_base):
+                    _set_progress(
+                        run_id,
+                        _b + done,
+                        progress_total,
+                        "discovering",
+                        f"回程补洞 {done}/{total}"
+                        + (f" · {day} ¥{int(price)}" if day and price else ""),
+                    )
+
+                try:
+                    got = scrape_google_one_way_days(
+                        d_code,
+                        o_code,
+                        fill_ret,
+                        adults=task.adults,
+                        timeout_ms=settings.ctrip_verify_timeout_ms,
+                        delay_sec=max(0.2, g_delay),
+                        on_each=on_fill_ret,
+                        should_stop=lambda: _cancel_requested_for(run_id),
+                        deadline_ts=budget_deadline,
+                    )
+                    ret_cal.update(got)
+                except Exception as e:
+                    _log.warning("回程 Google 补洞失败 %s→%s: %s", d_code, o_code, e)
+
+            _raise_if_cancelled(run_id)
+            cal_out_hits += len(out_cal)
+            cal_ret_hits += len(ret_cal)
+            cal_out_days_n += len(out_days)
+            cal_ret_days_n += len(ret_days)
+            pool = select_calendar_verify_pool(
+                out_cal,
+                ret_cal,
+                start,
+                end,
+                task.stay_min,
+                task.stay_max,
+                o_code,
+                d_code,
+                adults=task.adults,
+                currency=task.currency,
+                target_n=target_n,
+                candidate_k=cand_k,
+                pad_skeletons=False,
+            )
+            matched_n += len(pool)
+            all_candidates.extend(pool)
+            _log.info(
+                "日历匹配 %s→%s：去程有价 %s/%s 回程有价 %s/%s 候选 %s",
+                o_code,
+                d_code,
+                len(out_cal),
+                len(out_days),
+                len(ret_cal),
+                len(ret_days),
+                len(pool),
+            )
+
+        domestic = not any(
+            is_likely_international(o_code, d_code) for o_code, d_code in od_pairs
         )
+        if not all_candidates and domestic:
+            # 国内稀航线：TP/Google 补洞凑不出双边有价时，均匀骨架直进 OTA 核验（非 mock）
+            _set_progress(
+                run_id,
+                cal_steps + fill_budget,
+                progress_total,
+                "discovering",
+                "缓存/补洞无双边组合 · 国内均匀日期直核验",
+            )
+            for o_code, d_code in od_pairs:
+                pool = select_calendar_verify_pool(
+                    {},
+                    {},
+                    start,
+                    end,
+                    task.stay_min,
+                    task.stay_max,
+                    o_code,
+                    d_code,
+                    adults=task.adults,
+                    currency=task.currency,
+                    target_n=target_n,
+                    candidate_k=cand_k,
+                    pad_skeletons=True,
+                )
+                all_candidates.extend(pool)
+            used_skeleton_pad = bool(all_candidates)
+            _log.info(
+                "国内骨架回落：去程有价 %s/%s 回程有价 %s/%s 匹配 %s → 骨架候选 %s",
+                cal_out_hits,
+                cal_out_days_n or len(out_days),
+                cal_ret_hits,
+                cal_ret_days_n or len(ret_days),
+                matched_n,
+                len(all_candidates),
+            )
 
-        candidates = select_verify_pool(
-            priced,
-            combos,
-            ",".join(origins),
-            ",".join(dests),
-            adults=task.adults,
-            target=target_n,
-            currency=task.currency,
-            max_attempts=verify_attempts,
-        )
-        if not candidates:
-            raise RuntimeError("日期窗内没有可核验的往返组合")
+        if not all_candidates:
+            raise RuntimeError(
+                _empty_calendar_error(
+                    cal_out_hits,
+                    cal_out_days_n or len(out_days),
+                    cal_ret_hits,
+                    cal_ret_days_n or len(ret_days),
+                    matched_n,
+                    domestic=domestic,
+                )
+            )
 
+        all_candidates.sort(key=lambda o: (o.cache_price or o.total_price or 1e18))
+        candidates = all_candidates[:cand_k]
         for opt in candidates:
             _attach_all_links(opt, origin, opt.dest_code or dests[0], task.adults)
             if not opt.verify_url:
-                ensure_o = opt.origin_code or origin
-                ensure_d = opt.dest_code or dests[0]
-                opt.verify_url = ensure_verify_url(opt, ensure_o, ensure_d, task.adults)
+                opt.verify_url = ensure_verify_url(
+                    opt, opt.origin_code or origin, opt.dest_code or dests[0], task.adults
+                )
             if not opt.cache_price and opt.total_price > 0:
                 opt.cache_price = opt.total_price
 
+        _raise_if_cancelled(run_id)
+        phase_offset = cal_steps + fill_budget
+        from app.services.ctrip_verify import _ctrip_cticket
+
+        verify_providers = ["google"]
+        if domestic and _ctrip_cticket():
+            verify_providers = ["google", "ctrip_h5"]
+        provider_label = "+".join(verify_providers)
+        if used_skeleton_pad:
+            discover_label = (
+                f"缓存/补洞无双边组合 · 国内均匀日期直核验 {len(candidates)}"
+            )
+        else:
+            discover_label = f"日历匹配完成 · 双边有价候选 {len(candidates)}"
         _set_progress(
             run_id,
-            discover_total,
+            phase_offset,
             progress_total,
             "verifying",
-            f"发现完成：缓存有价 {len(priced)} · 将核验最多 {len(candidates)} 组以凑满 Top-{target_n}",
+            f"{discover_label} · {provider_label} 核验 Top-{target_n}"
+            f"（预算 {budget_sec}s）",
         )
 
         live_ok: list = []
+        verify_errors: list[str] = []
 
-        def on_verify(done: int, total: int, opt=None) -> None:
-            if opt is not None and getattr(opt, "verify_status", "") == "ok" and opt.verified_price:
-                live_ok.append(opt)
-                _persist_live_results(
-                    run_id, live_ok, task.currency, origin, dests[0], task.adults
-                )
-                price = float(opt.verified_price)
-                dest_tag = getattr(opt, "dest_code", "") or ""
-                msg = (
-                    f"OTA 核验 {done}/{total} · 已成功 {len(live_ok)}/{target_n} · "
-                    f"最新 {task.currency} {price:,.0f}"
-                    f"（{opt.outbound_date}→{opt.return_date}"
-                    + (f" · {dest_tag}" if dest_tag else "")
-                    + "）"
-                )
-            elif opt is not None and getattr(opt, "verify_status", "") == "failed":
-                msg = f"OTA 核验 {done}/{total} · 本组未通过，继续下一组（已成功 {len(live_ok)}）"
-            else:
-                msg = f"OTA 核验 {done}/{total} · 已成功 {len(live_ok)}/{target_n}"
-            _set_progress(run_id, discover_total + done, progress_total, "verifying", msg)
+        def on_verify_factory(label: str, base: int, total_hint: int):
+            def on_verify(done: int, total: int, opt=None) -> None:
+                if _cancel_requested_for(run_id):
+                    return
+                if opt is not None and getattr(opt, "verify_status", "") == "ok" and opt.verified_price:
+                    key = (opt.outbound_date, opt.return_date, (opt.dest_code or "").upper())
+                    live_ok[:] = [
+                        x
+                        for x in live_ok
+                        if (x.outbound_date, x.return_date, (x.dest_code or "").upper()) != key
+                    ]
+                    live_ok.append(opt)
+                    _persist_live_results(
+                        run_id, live_ok, task.currency, origin, dests[0], task.adults
+                    )
+                    price = float(opt.verified_price)
+                    dest_tag = getattr(opt, "dest_code", "") or ""
+                    src = getattr(opt, "source", "") or ""
+                    msg = (
+                        f"{label} {done}/{total_hint or total} · 成功池 {len(live_ok)} · "
+                        f"最新 {task.currency} {price:,.0f} [{src}]"
+                        f"（{opt.outbound_date}→{opt.return_date}"
+                        + (f" · {dest_tag}" if dest_tag else "")
+                        + "）"
+                    )
+                elif opt is not None and getattr(opt, "verify_status", "") == "failed":
+                    msg = f"{label} {done}/{total_hint or total} · 本组未通过（池内 {len(live_ok)}）"
+                else:
+                    msg = f"{label} {done}/{total_hint or total} · 池内 {len(live_ok)}"
+                _set_progress(run_id, base + done, progress_total, "verifying", msg)
 
-        verified_all, verify_errors = verify_candidates(
+            return on_verify
+
+        verify_timeout = settings.ctrip_verify_timeout_ms
+        if "ctrip_h5" in verify_providers:
+            verify_timeout = max(verify_timeout, 90000)
+        verified_a, err_a = verify_candidates(
             candidates,
             origin,
             dests[0],
             adults=task.adults,
-            timeout_ms=settings.ctrip_verify_timeout_ms,
-            delay_sec=min(settings.ctrip_verify_delay_sec, 1.0),
-            on_each=on_verify,
+            timeout_ms=verify_timeout,
+            delay_sec=max(0.2, g_delay),
+            on_each=on_verify_factory("核验", phase_offset, len(candidates)),
             target_ok=target_n,
+            should_stop=lambda: _cancel_requested_for(run_id),
+            providers=verify_providers,
+            deadline_ts=budget_deadline,
+            google_mode="full",
         )
-        ok_options = [o for o in verified_all if o.verify_status == "ok" and o.verified_price]
+        verify_errors.extend(err_a)
+        if _cancel_requested_for(run_id):
+            raise ScanCancelled()
+
+        google_ok = [o for o in verified_a if o.verify_status == "ok" and o.verified_price]
+        google_ok.sort(key=lambda o: o.verified_price or o.total_price)
+        phase_offset = cal_steps + fill_budget + len(candidates)
+
+        refined: list = []
+        if refine_top > 0 and google_ok and time.time() < budget_deadline:
+            import copy
+
+            from app.services.ctrip_verify import _ctrip_cticket
+
+            if _ctrip_cticket():
+                refine_list = [copy.copy(o) for o in google_ok[:refine_top]]
+                for opt in refine_list:
+                    opt.verify_status = "pending"
+                    opt.verified_price = None
+                h5_delay = float(getattr(settings, "ctrip_h5_verify_delay_sec", 2.5) or 2.5)
+                _set_progress(
+                    run_id,
+                    phase_offset,
+                    progress_total,
+                    "verifying",
+                    f"携程H5 精修头部 {len(refine_list)} 组",
+                )
+                refined, err_b = verify_candidates(
+                    refine_list,
+                    origin,
+                    dests[0],
+                    adults=task.adults,
+                    timeout_ms=max(settings.ctrip_verify_timeout_ms, 90000),
+                    delay_sec=max(1.0, h5_delay),
+                    on_each=on_verify_factory("携程精修", phase_offset, len(refine_list)),
+                    target_ok=len(refine_list),
+                    should_stop=lambda: _cancel_requested_for(run_id),
+                    providers=["ctrip_h5"],
+                    deadline_ts=budget_deadline,
+                )
+                verify_errors.extend(err_b)
+            else:
+                verify_errors.append("跳过携程精修：未配置 CTRIP_CTICKET")
+        if _cancel_requested_for(run_id):
+            raise ScanCancelled()
+
+        from app.services.ctrip_verify import _looks_like_schedule_summary
+
+        merged: dict = {}
+        for o in google_ok:
+            k = (o.outbound_date, o.return_date, (o.dest_code or "").upper())
+            merged[k] = o
+        for o in refined:
+            if o.verify_status != "ok":
+                continue
+            k = (o.outbound_date, o.return_date, (o.dest_code or "").upper())
+            base = merged.get(k)
+            h5_out = getattr(o, "summary_outbound", "") or ""
+            h5_ret = getattr(o, "summary_return", "") or ""
+            if base is None:
+                if o.verified_price:
+                    merged[k] = o
+                continue
+            if _looks_like_schedule_summary(h5_out):
+                base.summary_outbound = h5_out
+            if _looks_like_schedule_summary(h5_ret):
+                base.summary_return = h5_ret
+            if not base.verified_price and o.verified_price:
+                base.verified_price = o.verified_price
+                base.total_price = o.total_price
+                base.verify_status = "ok"
+                base.source = o.source
+
+        ok_options = [
+            o for o in merged.values() if o.verify_status == "ok" and o.verified_price
+        ]
         ok_options.sort(key=lambda o: o.verified_price or o.total_price)
         ok_options = ok_options[:target_n]
+        verified_all = list(merged.values())
 
         if not ok_options:
             detail = "; ".join(verify_errors[:5]) or "未知原因"
             raise RuntimeError(
-                f"OTA 核验全部失败（尝试 {len(verified_all)} 组），不得使用未核验缓存价作为最优结果。{detail}"
+                f"OTA 核验全部失败（Google/H5），不得使用未核验缓存价作为最优结果。{detail}"
             )
 
         for opt in ok_options:
@@ -423,6 +844,7 @@ def _run_scan_job(run_id: int, task_id: int) -> None:
 
         db.query(FlightResult).filter(FlightResult.run_id == run_id).delete()
         for i, opt in enumerate(ok_options, 1):
+            out_sum, ret_sum = _persist_leg_summaries(opt)
             db.add(
                 FlightResult(
                     run_id=run_id,
@@ -435,8 +857,8 @@ def _run_scan_job(run_id: int, task_id: int) -> None:
                     verified_price=float(opt.verified_price) if opt.verified_price is not None else None,
                     verify_status=opt.verify_status or "ok",
                     currency=opt.currency or task.currency,
-                    outbound_summary=opt.outbound_summary,
-                    return_summary=opt.return_summary,
+                    outbound_summary=out_sum,
+                    return_summary=ret_sum,
                     booking_class=opt.booking_class,
                     source=opt.source or "OtaVerified",
                     verify_url=opt.verify_url or "",
@@ -491,6 +913,7 @@ def _run_scan_job(run_id: int, task_id: int) -> None:
 
         run.notify_message = notify_msg
         db.commit()
+        _clear_cancel(run_id)
         _log.info(
             "扫描完成 task=%s run=%s status=%s min_price=%s verified=%s failed=%s",
             task_id,
@@ -500,23 +923,37 @@ def _run_scan_job(run_id: int, task_id: int) -> None:
             len(ok_options),
             failed_n,
         )
-    except Exception as e:
-        _log.exception("扫描失败 run=%s", run_id)
+    except ScanCancelled:
+        _log.info("扫描取消 run=%s", run_id)
         try:
-            run = db.query(ScanRun).filter(ScanRun.id == run_id).first()
-            if run:
-                run.status = "failed"
-                run.phase = ""
-                run.error = str(e)[:2000]
-                run.finished_at = datetime.utcnow()
-                db.commit()
-            task = db.query(WatchTask).filter(WatchTask.id == task_id).first()
-            if task:
-                task.next_run_at = datetime.utcnow() + timedelta(hours=max(1, task.interval_hours))
-                db.commit()
+            _finalize_cancelled(db, run_id, task_id)
         except Exception:
-            _log.exception("写入失败状态出错")
+            _log.exception("写入取消状态出错")
+    except Exception as e:
+        if _cancel_requested_for(run_id):
+            _log.info("扫描取消(异常路径) run=%s err=%s", run_id, e)
+            try:
+                _finalize_cancelled(db, run_id, task_id)
+            except Exception:
+                _log.exception("写入取消状态出错")
+        else:
+            _log.exception("扫描失败 run=%s", run_id)
+            try:
+                run = db.query(ScanRun).filter(ScanRun.id == run_id).first()
+                if run:
+                    run.status = "failed"
+                    run.phase = ""
+                    run.error = str(e)[:2000]
+                    run.finished_at = datetime.utcnow()
+                    db.commit()
+                task = db.query(WatchTask).filter(WatchTask.id == task_id).first()
+                if task:
+                    task.next_run_at = datetime.utcnow() + timedelta(hours=max(1, task.interval_hours))
+                    db.commit()
+            except Exception:
+                _log.exception("写入失败状态出错")
     finally:
+        _clear_cancel(run_id)
         db.close()
         with _run_lock:
             _active_task_ids.discard(task_id)

@@ -17,16 +17,25 @@ const SCENE_LABELS = [
 export default function SceneProgress({ index, total, onJump }: Props) {
   return (
     <nav className="story-progress" aria-label="分镜进度">
-      {Array.from({ length: total }, (_, i) => (
-        <button
-          key={i}
-          type="button"
-          className={`story-progress-dot ${i === index ? 'is-active' : ''} ${i < index ? 'is-done' : ''}`}
-          aria-label={`跳到第 ${i + 1} 幕：${SCENE_LABELS[i] ?? ''}（共 ${total} 幕）`}
-          aria-current={i === index ? 'true' : undefined}
-          onClick={() => onJump(i)}
+      <div className="story-progress-rail" aria-hidden>
+        <span
+          className="story-progress-fill"
+          style={{ ['--story-progress' as string]: String(total > 1 ? index / (total - 1) : 0) }}
         />
-      ))}
+      </div>
+      <ol className="story-progress-list">
+        {Array.from({ length: total }, (_, i) => (
+          <li key={i} className="story-progress-item">
+            <button
+              type="button"
+              className={`story-progress-dot ${i === index ? 'is-active' : ''} ${i < index ? 'is-done' : ''}`}
+              aria-label={`跳到第 ${i + 1} 幕：${SCENE_LABELS[i] ?? ''}（共 ${total} 幕）`}
+              aria-current={i === index ? 'true' : undefined}
+              onClick={() => onJump(i)}
+            />
+          </li>
+        ))}
+      </ol>
     </nav>
   )
 }

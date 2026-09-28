@@ -3,49 +3,6 @@
  * 结构与设计 token 来自 demo/css/base.css + theme-airmail.css（用户选型：变体 3）。
  */
 
-@font-face {
-  font-family: 'Playfair Display';
-  src: url('/fonts/playfair-400.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: 'Playfair Display';
-  src: url('/fonts/playfair-600.woff2') format('woff2');
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: 'Playfair Display';
-  src: url('/fonts/playfair-700.woff2') format('woff2');
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: 'IBM Plex Mono';
-  src: url('/fonts/plex-mono-400.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: 'IBM Plex Mono';
-  src: url('/fonts/plex-mono-500.woff2') format('woff2');
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: 'IBM Plex Mono';
-  src: url('/fonts/plex-mono-600.woff2') format('woff2');
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-
 :root {
   --bg: #e9e2d2;
   --surface: #f4efe3;
@@ -72,8 +29,8 @@
   --radius-sm: 5px;
   --radius-xs: 4px;
   --radius-pill: 999px;
-  --font-ui: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
-  --font-display: 'Playfair Display', Georgia, 'Songti SC', 'SimSun', serif;
+  --font-ui: 'Noto Sans SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-display: 'Playfair Display', 'Noto Serif SC', 'Songti SC', 'Source Han Serif SC', Georgia, serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Consolas, monospace;
 
   --topbar-bg: rgba(244, 239, 227, 0.93);
@@ -288,11 +245,12 @@ main {
 .head-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
 
 .section-label {
-  font-size: 0.68rem;
+  font-family: var(--font-ui);
+  font-size: 0.8rem;
   font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--text-3);
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--text-2);
   margin-bottom: 0.5rem;
 }
 
@@ -517,21 +475,31 @@ tbody tr:hover { background: var(--row-hover); }
 .code-chip .arrow { color: var(--text-3); font-weight: 400; }
 
 /* ---------- OTA 按钮 ---------- */
-.ota-links { display: flex; gap: 0.3rem; flex-wrap: nowrap; }
+.ota-links {
+  display: inline-flex;
+  gap: 0.35rem;
+  flex-wrap: nowrap;
+  align-items: center;
+}
 .ota-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   padding: 0.22rem 0.58rem;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line-strong);
   background: var(--btn-bg);
   color: var(--text-2);
   font-size: 0.74rem;
-  font-weight: 500;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   text-decoration: none !important;
-  transition: all 0.15s;
+  white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 .ota-btn:hover { border-color: var(--blue); color: var(--blue); background: var(--blue-soft); }
+.fr-days-inline { display: none; color: var(--text-3); font-weight: 500; }
+.fr-ota { justify-self: end; }
 
 /* ---------- 首页：主从分栏 ---------- */
 .md-layout { display: grid; grid-template-columns: 300px 1fr; gap: 0.9rem; align-items: start; }
@@ -645,6 +613,38 @@ tbody tr:hover { background: var(--row-hover); }
 .scan-phase { display: inline-flex; align-items: center; gap: 0.45rem; font-weight: 600; font-size: 0.95rem; letter-spacing: -0.01em; }
 .scan-pct { font-family: var(--font-mono); font-size: 1.15rem; font-weight: 600; color: var(--blue); font-variant-numeric: tabular-nums; }
 .scan-count { font-family: var(--font-mono); font-size: 0.76rem; color: var(--text-3); margin-top: 0.35rem; font-variant-numeric: tabular-nums; }
+.scan-eta {
+  margin-top: 0.55rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--blue) 18%, transparent);
+}
+.scan-eta-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.scan-eta-remain {
+  font-size: 0.98rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-1);
+}
+.scan-eta-elapsed {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.scan-eta-hint {
+  margin: 0.28rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--text-2);
+}
 
 .progress {
   height: 6px;
@@ -702,15 +702,22 @@ tbody tr:hover { background: var(--row-hover); }
   border-top: var(--divider);
 }
 .best-price {
-  font-family: var(--font-display);
-  font-size: 1.7rem;
+  font-family: var(--font-mono);
+  font-size: clamp(1.7rem, 2.4vw, 2rem);
   font-weight: 700;
   color: var(--amber);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
-  line-height: 1.1;
+  line-height: 1.05;
 }
-.best-cache { font-size: 0.73rem; color: var(--text-3); font-family: var(--font-mono); margin-top: 0.1rem; }
+.best-cache {
+  margin-top: 0.2rem;
+  font-family: var(--font-ui);
+  font-size: 0.76rem;
+  font-weight: 500;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+}
 
 /* ---------- Top-N 票价表 ---------- */
 .fare-table {
@@ -746,26 +753,53 @@ tbody tr:hover { background: var(--row-hover); }
 .fr-row.best .fr-rank { color: var(--amber); }
 .fr-dates { font-family: var(--font-mono); font-size: 0.86rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .fr-days { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-3); }
-.fr-flight { font-size: 0.82rem; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fr-flight {
+  min-width: 0;
+  font-size: 0.82rem;
+  color: var(--text-2);
+}
 .fr-flight .leg {
-  display: block;
-  font-family: var(--font-mono);
-  font-size: 0.76rem;
-  line-height: 1.35;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 0.8rem;
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.fr-flight .leg + .leg {
+  margin-top: 0.12rem;
+}
 .fr-flight .leg-label {
-  display: inline-block;
-  width: 1.6em;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.35rem;
+  height: 1.2rem;
+  padding: 0 0.28rem;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  background: rgba(31, 77, 58, 0.06);
+  color: var(--green);
+  font-family: var(--font-ui);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+}
+.fr-flight .leg-empty {
   color: var(--text-3);
   font-family: var(--font-ui);
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
+  font-size: 0.8rem;
+  font-weight: 500;
 }
-.fr-flight .leg-empty { color: var(--text-3); font-family: var(--font-ui); font-size: 0.78rem; }
 .fr-price { font-family: var(--font-mono); font-size: 0.95rem; font-weight: 600; color: var(--amber); font-variant-numeric: tabular-nums; text-align: right; }
 
 /* ---------- 登录页 ---------- */
@@ -856,6 +890,67 @@ tbody tr:hover { background: var(--row-hover); }
   .md-layout { grid-template-columns: 1fr; }
   .detail-grid { grid-template-columns: 1fr; }
   .fr-head { display: none; }
-  .fr-row { grid-template-columns: 1.6rem minmax(0, 1fr) auto; row-gap: 0.3rem; }
-  .fr-row .fr-days, .fr-row .fr-flight { display: none; }
+  .fare-table { border-radius: var(--radius); }
+  .fr-row {
+    display: grid;
+    grid-template-columns: 1.75rem minmax(0, 1fr) auto;
+    grid-template-areas:
+      "rank dates price"
+      "flight flight flight"
+      "links links links";
+    gap: 0.45rem 0.55rem;
+    padding: 0.85rem 0.9rem;
+    align-items: start;
+  }
+  .fr-row + .fr-row { border-top: 1px solid var(--line); }
+  .fr-rank { grid-area: rank; padding-top: 0.12rem; }
+  .fr-dates {
+    grid-area: dates;
+    white-space: normal;
+    line-height: 1.35;
+  }
+  .fr-days-inline { display: inline; }
+  .fr-days { display: none; }
+  .fr-flight {
+    grid-area: flight;
+    display: grid !important;
+    gap: 0.2rem;
+    padding: 0.45rem 0.55rem;
+    border-radius: var(--radius-sm);
+    background: rgba(32, 48, 42, 0.035);
+    border: 1px solid rgba(179, 164, 130, 0.45);
+  }
+  .fr-flight .leg {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: unset;
+    line-height: 1.4;
+  }
+  .fr-price {
+    grid-area: price;
+    font-size: 1.05rem;
+    line-height: 1.2;
+    padding-top: 0.05rem;
+  }
+  .fr-ota {
+    grid-area: links;
+    justify-self: stretch;
+    width: 100%;
+  }
+  .ota-links {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(28%, 1fr));
+    gap: 0.4rem;
+    width: 100%;
+  }
+  .ota-btn {
+    width: 100%;
+    min-height: 2.4rem;
+    padding: 0.55rem 0.35rem;
+    font-size: 0.82rem;
+    border-radius: var(--radius-sm);
+  }
+  .ota-btn.ota-ctrip { color: #0b6e99; border-color: #9fc7d8; background: #eef7fb; }
+  .ota-btn.ota-qunar { color: #1f4d3a; border-color: #b3c7b0; background: #eef4ea; }
+  .ota-btn.ota-google { color: #8a4b12; border-color: #e0c29a; background: #faf1e4; }
 }

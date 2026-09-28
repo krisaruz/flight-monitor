@@ -1,7 +1,10 @@
 """Travelpayouts 解析与批次估算单测（无网络）。"""
 from __future__ import annotations
 
+import io
 import sys
+import threading
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -83,7 +86,7 @@ def test_row_to_option_includes_flight_no_and_times() -> None:
 
 
 def test_scan_window_uses_prices_for_dates() -> None:
-    client = TravelpayoutsClient("dummy", request_delay_sec=0.01)
+    client = TravelpayoutsClient("dummy", request_delay_sec=0.01, concurrency=1)
 
     def fake_fetch(origin, destination, departure_at, return_at, currency="CNY", limit=5):
         if departure_at == "2026-11-20" and return_at == "2026-11-24":
@@ -119,8 +122,49 @@ def test_scan_window_uses_prices_for_dates() -> None:
     assert "HX3" in opts[0].outbound_summary
 
 
+def test_scan_window_parallel_completes_all_combos() -> None:
+    client = TravelpayoutsClient("dummy", request_delay_sec=0.01, concurrency=4)
+    seen: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def fake_fetch(origin, destination, departure_at, return_at, currency="CNY", limit=5):
+        with lock:
+            seen.append((departure_at, return_at))
+        return [
+            {
+                "price": 1200,
+                "airline": "UO",
+                "flight_number": "1",
+                "departure_at": f"{departure_at}T10:00:00+08:00",
+                "return_at": f"{return_at}T12:00:00+09:00",
+                "transfers": 0,
+                "return_transfers": 0,
+                "origin_airport": "HKG",
+                "destination_airport": "KIX",
+                "duration_to": 200,
+                "duration_back": 210,
+            }
+        ]
+
+    progress: list[tuple[int, int]] = []
+    with patch.object(client, "fetch_prices_for_dates", side_effect=fake_fetch):
+        opts = client.scan_window(
+            "HKG",
+            "KIX",
+            datetime(2026, 11, 15),
+            datetime(2026, 11, 16),
+            stay_min=3,
+            stay_max=4,
+            on_progress=lambda d, t: progress.append((d, t)),
+        )
+    # 2 天 × 2 停留 = 4
+    assert len(seen) == 4
+    assert len(opts) == 4
+    assert progress[-1] == (4, 4)
+
+
 def test_scan_window_network_failure_is_fatal() -> None:
-    client = TravelpayoutsClient("dummy", request_delay_sec=0.01)
+    client = TravelpayoutsClient("dummy", request_delay_sec=0.01, concurrency=1)
 
     with patch.object(client, "fetch_prices_for_dates", side_effect=RuntimeError("boom")):
         try:
@@ -137,6 +181,67 @@ def test_scan_window_network_failure_is_fatal() -> None:
             raised = True
             assert "boom" in str(e)
     assert raised
+
+
+def _http_error(url: str, code: int, body: bytes = b"rate limit", retry_after: str = "1") -> urllib.error.HTTPError:
+    from email.message import Message
+
+    hdrs = Message()
+    hdrs["Retry-After"] = retry_after
+    return urllib.error.HTTPError(url, code, "Too Many", hdrs=hdrs, fp=io.BytesIO(body))
+
+
+def test_get_rate_limit_retries_and_emits_status() -> None:
+    client = TravelpayoutsClient("dummy", request_delay_sec=0.01, concurrency=1)
+    statuses: list[str] = []
+    client._status_cb = statuses.append
+    calls = {"n": 0}
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"success":true,"data":[]}'
+
+    class FakeOpener:
+        def open(self, req, timeout=45):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _http_error(req.full_url, 429)
+            return FakeResp()
+
+    with patch("app.services.travelpayouts._http_opener", return_value=FakeOpener()):
+        with patch.object(client, "_acquire_request_slot", return_value=None):
+            with patch("app.services.travelpayouts.time.sleep", return_value=None):
+                data = client._get("/aviasales/v3/prices_for_dates", {"origin": "HKG"})
+    assert data.get("success") is True
+    assert calls["n"] == 2
+    assert any("限流" in s for s in statuses)
+
+
+def test_get_rate_limit_exhausted_fails_closed() -> None:
+    client = TravelpayoutsClient("dummy", request_delay_sec=0.01, concurrency=1)
+
+    class FakeOpener:
+        def open(self, req, timeout=45):
+            raise _http_error(req.full_url, 429)
+
+    with patch("app.services.travelpayouts._http_opener", return_value=FakeOpener()):
+        with patch.object(client, "_acquire_request_slot", return_value=None):
+            with patch("app.services.travelpayouts.time.sleep", return_value=None):
+                try:
+                    client._get("/x", {}, retries=2)
+                    raised = False
+                    msg = ""
+                except RuntimeError as e:
+                    raised = True
+                    msg = str(e)
+    assert raised
+    assert "限流" in msg or "429" in msg
 
 
 def test_select_verify_pool_fills_to_top_n() -> None:

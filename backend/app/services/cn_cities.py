@@ -9,8 +9,9 @@ from pathlib import Path
 _DATA = Path(__file__).resolve().parents[1] / "data" / "cn_cities.json"
 
 # 「中国大陆（不限机场）」只扩主要枢纽，避免数百 OD 组合拖垮扫价
+# 主要枢纽：存 IATA 机场码（北京/西安用 PEK/XIY；上海保留 SHA=虹桥，TP 边界再映射）
 CN_MAJOR_HUB_CODES: tuple[str, ...] = (
-    "BJS",
+    "PEK",
     "SHA",
     "CAN",
     "SZX",
@@ -18,7 +19,7 @@ CN_MAJOR_HUB_CODES: tuple[str, ...] = (
     "CKG",
     "HGH",
     "NKG",
-    "SIA",  # 西安（Travelpayouts 城市码；机场码 XIY 见别名）
+    "XIY",
     "KMG",
     "XMN",
     "WUH",
@@ -55,26 +56,37 @@ def load_cn_cities() -> tuple[dict[str, str | tuple[str, ...]], ...]:
     return tuple(out)
 
 
+# JSON 内少数 TP 城市码 → 主机场
+CN_JSON_CITY_TO_AIRPORT = {
+    "BJS": "PEK",
+    "SIA": "XIY",
+}
+
+
 def cn_city_alias_map() -> dict[str, str]:
-    """中文名 / 英文别名 / 小写三字码 → 城市码。"""
+    """中文名 / 英文别名 / 小写三字码 → 主机场码。"""
     m: dict[str, str] = {}
     for row in load_cn_cities():
-        code = str(row["code"])
+        raw = str(row["code"]).strip().upper()
+        code = CN_JSON_CITY_TO_AIRPORT.get(raw, raw)
         m[code.lower()] = code
+        if raw != code:
+            m[raw.lower()] = code
         m[str(row["name_zh"]).strip().lower()] = code
         for a in row["aliases"]:
             m[str(a).strip().lower()] = code
-    # 常见机场码 → 城市码
+    # 机场码别名
     m.update(
         {
-            "pek": "BJS",
-            "pkx": "BJS",
-            "pvg": "SHA",
+            "pek": "PEK",
+            "pkx": "PEK",
+            "bjs": "PEK",
+            "pvg": "PVG",
             "sha": "SHA",
-            "tfu": "CTU",
+            "tfu": "TFU",
             "ctu": "CTU",
-            "xiy": "SIA",
-            "sia": "SIA",
+            "xiy": "XIY",
+            "sia": "XIY",
         }
     )
     return m

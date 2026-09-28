@@ -63,9 +63,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth.router)
-app.include_router(me.router)
-app.include_router(admin.router)
+if not settings.public_mode:
+    app.include_router(auth.router)
+    app.include_router(me.router)
+    app.include_router(admin.router)
 app.include_router(places.router)
 app.include_router(tasks.router)
 
@@ -80,6 +81,7 @@ def health() -> dict:
         "provider": "hybrid" if ready else "unconfigured",
         "pipeline": "travelpayouts+ctrip",
         "demo": settings.use_demo,
+        "public_mode": settings.public_mode,
         "travelpayouts_configured": tp_ok,
         "travelpayouts_ok": tp_ok and not settings.use_demo,
         "playwright_ok": pw_ok,

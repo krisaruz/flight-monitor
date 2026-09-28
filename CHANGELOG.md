@@ -9,6 +9,59 @@
 
 ---
 
+## 2026-09-28
+
+### Added
+
+- **公开模式代码入库（迁移固化）**：线上 ECS 实际运行的公开模式（public_mode）全量代码此前仅存于本机工作区（热补丁机制导致仓库与线上脱节），本次整体提交入库——`public_mode`/日历匹配混合管线（`calendar_match.py`）、公开扫价限流（`rate_limit.py`，每 IP 每小时上限 + 白名单）、`Dockerfile.public`（Chrome+xvfb 公开云镜像）、`docker-compose.public.yml`（WARP+autoheal 生产栈）、`DEPLOY_ALIYUN.md` 部署文档、前端字体栈（`fonts.css`）、相关测试 4 个（calendar_match / google_airport / rate_limit / scanner_calendar_fallback）。行为与线上现状一致，无新变更。
+
+---
+
+## 2026-09-02
+
+### Added
+
+- **WARP 自愈（autoheal）**：生产栈新增 `willfarrell/autoheal` 容器，`warp-proxy` 打 `autoheal=true` 标签并补 healthcheck（SOCKS5h 走 `www.google.com`，60s/5 次）。WARP 隧道断连但进程存活时（Docker restart 策略失效的死局），healthcheck 转 unhealthy 后 autoheal 自动重启容器恢复隧道。已在 ECS 实战验证一轮自动恢复。
+
+### Fixed
+
+- **OTA 核验连续失败（ERR_SOCKS_CONNECTION_FAILED）**：根因是 8-27 起 WARP 隧道断连且无人自愈，静默故障 5.6 天；手动重启 warp 恢复，并以上述 autoheal 方案防复发。任务 #22 复扫通过（HKG→NGO 最低核验价 CNY 1,987）。
+
+---
+
+## 2026-07-30
+
+### Added
+
+- **公开扫价 IP 白名单**：配置 `PUBLIC_SCAN_IP_WHITELIST`（逗号分隔）；命中后不受「每 IP 每小时 N 次」限制。本机 `127.0.0.1` / `::1` 始终放行。
+
+### Fixed
+
+- **国内稀航线发现阶段硬失败**：TP 日历无缓存且 Google 单程补洞凑不出「去+回都有价」组合时（如 ZUH→DAT），国内航线改为均匀日期骨架直进 OTA 核验，不再在发现阶段直接报「没有日历价组合」；进度提示「缓存/补洞无双边组合 · 国内均匀日期直核验」。国际航线仍不默认开骨架。
+- **空候选错误文案**：仍失败时附带「去程有价 a/b、回程有价 c/d、匹配 n」，便于判断是数据空洞还是匹配失败。
+
+### Changed
+
+- **PRD v1.9**：核验池组装明确日历匹配优先、国内空池骨架回落、国际不默认骨架。
+- **健康检查 hint**：管线说明改为「双边有价匹配（国内空池均匀骨架直核验）」。
+
+---
+
+## 2026-07-28
+
+### Changed
+
+- **代理部署约定**：默认线上改动先热补丁（`patch/` bind mount + recreate）立刻验收；每次改完须询问是否重建 `gatefare:public` 镜像以免 patch 堆积。见 `AGENTS.md` §16、`.cursor/rules/aliyun-patch-deploy.mdc`、`DEPLOY_ALIYUN.md`。
+- **缓存发现再提速**：默认 `TRAVELPAYOUTS_CONCURRENCY=6`、`TRAVELPAYOUTS_REQUEST_DELAY=0.2s`（相对此前 4×0.35；仍远低于官方 prices_for_dates≈600/min；限流提示与退避不变）。
+- **Google 核验加速**：打开后等价格符号即可继续（约 8s 超时），不再空等 `networkidle`；缩短价格/回程轮询与点选等待；候选间隔默认 `CTRIP_VERIFY_DELAY_SEC=0.6`（仍串行单浏览器，适配 2G 机）。
+- **缓存发现加速**（同日早先）：同一 OD 内日期组合有限并行；HTTP 429 写入可见进度「缓存限流」。
+
+### Added
+
+- 配置项 `TRAVELPAYOUTS_CONCURRENCY`（1–16）；`.env.example` 补充发现阶段并发与间隔、核验间隔说明。
+
+---
+
 ## 2026-07-27
 
 ### Removed
@@ -17,6 +70,8 @@
 
 ### Changed
 
+- **Story Nav 入场动画升级**：六幕统一为「航站调度接力」体验；新增随滚动点亮的航线、`GF-01` 至 `GF-06` 当前幕读数、分层景深入场与一次性舞台扫描，强化场景衔接且不增加持续干扰。
+- **Story Nav 响应式与无障碍动效**：窄屏隐藏装饰航线并保留幕编号；减少动态效果偏好下关闭航线描绘、扫描和景深位移，正文、交互与 CTA 保持完整可用。
 - **Story Nav 文案定稿（软安心）**：采用用户选定组合——「行程还在酝酿，完全正常」「大概那两周就可以开工」「最合适的机场也不用你先猜」「找到了再确认是真价」「设好区间先去做别的事」「一点点意向就够出发」；CTA「帮我盯着」。卖点：模糊区间 + 出行想法 → 盯最便宜那一程。
 - **Story Nav 文案对齐卖点 / 口语重写**：叙事主轴为模糊区间与出行意向（承接上条定稿）。
 - **Story Nav 全文中文**：分镜标题、副文、按钮、核验状态、通知、下滑提示与进度点文案改为中文（品牌/OTA 专名保留）。
@@ -41,6 +96,10 @@
 - **携程核验抗干扰**：去掉 `--enable-automation`、加强 stealth 脚本、`Asia/Shanghai` 时区、先访问航班首页暖场再进列表、轻量鼠标滚动；硬拦截时本轮跳过该源。
 - OTA 价解析：下限 ¥450，优先接口 JSON 价，拒绝营销条噪声；单源导航异常不再中断整条回落链。
 - **PRD v1.4**：同步多平台核验顺序与反爬预期（不承诺单源零拦截）。
+
+### Fixed
+
+- **Story Nav 可访问入口**：将最新前端构建同步到 `backend/static`，修复后端 `8000` 仍提供旧静态包、访问 `/story` 无法看到动画的问题；本地正式入口为 `http://127.0.0.1:8000/story`，`5173/story` 仅在 Vite 开发服务运行时可用。
 
 ---
 

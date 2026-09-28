@@ -68,7 +68,7 @@ class ScanRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("watch_tasks.id", ondelete="CASCADE"), index=True)
     trigger: Mapped[str] = mapped_column(String(16), default="manual")  # manual | schedule
-    # pending | running | done | partial | failed
+    # pending | running | done | partial | failed | cancelled
     status: Mapped[str] = mapped_column(String(16), default="pending")
     # discovering | verifying | ""
     phase: Mapped[str] = mapped_column(String(32), default="")

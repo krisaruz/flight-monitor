@@ -1,0 +1,84 @@
+# 生产栈（阿里云 ECS）：WARP SOCKS + Gatefare 公开模式
+# 用法：放在 /opt/flight-monitor 后执行 docker compose -f docker-compose.public.yml up -d
+# 代码打进 gatefare:public 镜像，不再挂载 patch/
+# 密度/预算等旋钮写在 .env（CALENDAR_* / GOOGLE_VERIFY_WORKERS / CTRIP_H5_REFINE_TOP / VERIFY_BUDGET_SEC）
+services:
+  warp:
+    image: caomingjun/warp:latest
+    container_name: warp-proxy
+    restart: unless-stopped
+    labels:
+      - autoheal=true
+    ports:
+      - "127.0.0.1:40000:1080"
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+    environment:
+      WARP_SLEEP: "3"
+    volumes:
+      - /opt/warp-data:/var/lib/cloudflare-warp
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--proxy", "socks5h://127.0.0.1:1080", "https://www.google.com/", "-o", "/dev/null"]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 40s
+
+  # WARP 隧道断连时进程仍存活，Docker restart 策略不会触发；
+  # autoheal 监听 healthcheck 的 unhealthy 状态并自动重启带 autoheal=true 标签的容器
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: warp-autoheal
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_START_PERIOD: "60"
+      AUTOHEAL_INTERVAL: 15s
+      AUTOHEAL_RETRIES: 3
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  web:
+    image: gatefare:public
+    container_name: flight-monitor-web-1
+    network_mode: host
+    depends_on:
+      - warp
+    env_file:
+      - .env
+    environment:
+      DISPLAY: ":99"
+      OTA_VERIFY_PROVIDERS: google,ctrip_h5
+      OTA_PROXY: socks5://127.0.0.1:40000
+      OTA_VERIFY_HEADLESS: "false"
+      CTRIP_VERIFY_TIMEOUT_MS: "120000"
+      PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL: "0"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    mem_limit: 1800m
+    shm_size: 256m
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        set -e
+        rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+        Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 &
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          if [ -S /tmp/.X11-unix/X99 ]; then
+            echo "Xvfb ready on :99"
+            break
+          fi
+          sleep 0.5
+        done
+        if [ ! -S /tmp/.X11-unix/X99 ]; then
+          echo "ERROR: Xvfb failed to start" >&2
+          cat /tmp/xvfb.log >&2 || true
+          exit 1
+        fi
+        export DISPLAY=:99
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000

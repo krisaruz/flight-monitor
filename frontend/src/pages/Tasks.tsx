@@ -15,7 +15,7 @@ const emptyForm = {
   origin: '香港',
   origin_codes: 'HKG',
   dest: '大阪',
-  dest_codes: 'OSA',
+  dest_codes: 'KIX',
   ...defaultDates(),
   stay_min: 3,
   stay_max: 5,
@@ -25,7 +25,7 @@ const emptyForm = {
   enabled: false,
 }
 
-export default function Tasks() {
+export default function Tasks({ publicMode = false }: { publicMode?: boolean }) {
   const nav = useNavigate()
   const [tasks, setTasks] = useState<Task[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -71,8 +71,8 @@ export default function Tasks() {
         stay_min: Number(form.stay_min),
         stay_max: Number(form.stay_max),
         top_n: Number(form.top_n),
-        interval_hours: Number(form.interval_hours),
-        enabled: form.enabled,
+        interval_hours: publicMode ? 6 : Number(form.interval_hours),
+        enabled: publicMode ? false : form.enabled,
         ...(form.target_price ? { target_price: Number(form.target_price) } : {}),
       })
       setShowForm(false)
@@ -92,7 +92,7 @@ export default function Tasks() {
         origin: '香港',
         dest: '大阪',
         origin_codes: 'HKG',
-        dest_codes: 'OSA',
+        dest_codes: 'KIX',
         start_date: '2026-11-15',
         end_date: '2026-12-07',
         stay_min: 3,
@@ -132,12 +132,18 @@ export default function Tasks() {
       <div className="page-head">
         <div>
           <h1>任务板</h1>
-          <p className="muted">缓存扫窗 → OTA 核验 → Top-10 核验价排序</p>
+          <p className="muted">
+            {publicMode
+              ? '公开检索：缓存扫窗 → OTA 核验 → Top-10 核验价（免登录）'
+              : '缓存扫窗 → OTA 核验 → Top-10 核验价排序'}
+          </p>
         </div>
         <div className="head-actions">
-          <button type="button" onClick={() => setShowForm((v) => !v)}>
-            {showForm ? '收起表单' : '示例扫价'}
-          </button>
+          {!publicMode && (
+            <button type="button" onClick={() => setShowForm((v) => !v)}>
+              {showForm ? '收起表单' : '示例扫价'}
+            </button>
+          )}
           <button type="button" className="primary" onClick={() => setShowForm((v) => !v)}>
             <Icon name="plus" size={15} />
             {showForm ? '收起' : '新建搜索'}
@@ -147,13 +153,15 @@ export default function Tasks() {
 
       <div className="stat-strip">
         <div className="stat-cell">
-          <div className="stat-label">在盯航线</div>
+          <div className="stat-label">{publicMode ? '我的搜索' : '在盯航线'}</div>
           <div className="stat-num"><TweenNumber value={tasks.length} /></div>
         </div>
+        {!publicMode && (
         <div className="stat-cell">
           <div className="stat-label">定时盯价中</div>
           <div className="stat-num"><TweenNumber value={stats.watching} /></div>
         </div>
+        )}
         <div className="stat-cell">
           <div className="stat-label">历史核验最低{stats.bestCur ? ` (${stats.bestCur})` : ''}</div>
           <div className="stat-num amber">
@@ -204,11 +212,15 @@ export default function Tasks() {
           <label>最长停留(天)<input type="number" min={1} value={form.stay_max} onChange={(e) => setForm({ ...form, stay_max: Number(e.target.value) })} /></label>
           <label>心理价(可选)<input type="number" min={1} value={form.target_price} onChange={(e) => setForm({ ...form, target_price: e.target.value })} placeholder="例如 1500" /></label>
           <label>展示最便宜 N 个<input type="number" min={10} max={50} value={form.top_n} onChange={(e) => setForm({ ...form, top_n: Math.max(10, Number(e.target.value) || 10) })} /></label>
-          <label>扫描间隔(小时)<input type="number" min={1} value={form.interval_hours} onChange={(e) => setForm({ ...form, interval_hours: Number(e.target.value) })} /></label>
-          <label className="checkbox-row">
-            <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
-            启用定时盯价（按间隔重复扫价）
-          </label>
+          {!publicMode && (
+            <>
+              <label>扫描间隔(小时)<input type="number" min={1} value={form.interval_hours} onChange={(e) => setForm({ ...form, interval_hours: Number(e.target.value) })} /></label>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
+                启用定时盯价（按间隔重复扫价）
+              </label>
+            </>
+          )}
           <button className="primary" type="submit">创建并打开详情</button>
         </form>
       )}

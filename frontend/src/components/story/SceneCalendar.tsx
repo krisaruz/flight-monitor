@@ -199,8 +199,8 @@ export default function SceneCalendar({ active, onCtaReady }: Props) {
         </p>
 
         <div className={`story-cta-wrap ${showCta ? 'is-in' : ''}`}>
-          <Link to="/login" className="story-btn story-btn-primary">
-            帮我盯着
+          <Link to="/app" className="story-btn story-btn-primary">
+            开始搜票
           </Link>
         </div>
 

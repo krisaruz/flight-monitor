@@ -56,7 +56,7 @@ def test_suggest_zhuhai_and_english_alias() -> None:
 
 def test_china_country_uses_major_hubs_only() -> None:
     codes = expand_codes("", "中国大陆（不限机场）")
-    assert "BJS" in codes and "SHA" in codes and "ZUH" in codes
+    assert "PEK" in codes and "SHA" in codes and "ZUH" in codes
     assert len(codes) < 40
     # 全量城市可搜，但不因「不限机场」一次展开
     assert len(load_cn_cities()) > len(codes)
@@ -64,6 +64,27 @@ def test_china_country_uses_major_hubs_only() -> None:
 
 def test_resolve_airport_cn_catalog() -> None:
     assert resolve_airport("珠海") == "ZUH"
-    assert resolve_airport("西安") == "SIA"
-    assert resolve_airport("XIY") == "SIA"
+    assert resolve_airport("西安") == "XIY"
+    assert resolve_airport("XIY") == "XIY"
     assert resolve_airport("日照") == "RIZ"
+
+
+def test_osaka_suggests_airport_not_city_code() -> None:
+    rows = list_suggestions("大阪", limit=20)
+    airport = next(r for r in rows if r.kind == "airport" and r.id == "KIX")
+    assert airport.codes == ["KIX"]
+    label, codes = normalize_place("大阪", "OSA")
+    assert "大阪" in label
+    assert codes == "KIX"
+    assert expand_codes("OSA", "大阪") == ["KIX"]
+
+
+def test_suggest_united_states() -> None:
+    rows = list_suggestions("美国", limit=30)
+    country = next(r for r in rows if r.kind == "country" and r.id == "US")
+    assert "JFK" in country.codes and "LAX" in country.codes
+    assert any(r.id == "JFK" for r in rows if r.kind == "airport")
+    assert expand_codes("", "美国（不限机场）") == country.codes
+
+    en = list_suggestions("USA", limit=20)
+    assert any(r.id == "US" for r in en if r.kind == "country")

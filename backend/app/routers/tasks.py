@@ -4,16 +4,18 @@ import asyncio
 import json
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 
+from app.config import settings
 from app.database import SessionLocal, get_db
 from app.deps import get_current_user
 from app.models import ScanRun, User, WatchTask
+from app.rate_limit import check_public_scan_limit
 from app.schemas import RefreshOut, ScanRunOut, TaskCreateIn, TaskOut, TaskUpdateIn
 from app.services.places import normalize_place
-from app.services.scanner import enqueue_scan, estimate_combinations
+from app.services.scanner import enqueue_scan, estimate_combinations, request_cancel_run
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -40,9 +42,11 @@ def list_tasks(user: User = Depends(get_current_user), db: Session = Depends(get
 @router.post("", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
 def create_task(
     body: TaskCreateIn,
+    request: Request,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> TaskOut:
+    check_public_scan_limit(request)
     if body.stay_max < body.stay_min:
         raise HTTPException(status_code=400, detail="stay_max 不能小于 stay_min")
     start = datetime.strptime(body.start_date, "%Y-%m-%d")
@@ -55,6 +59,10 @@ def create_task(
         dest_label, dest_codes = normalize_place(body.dest, body.dest_codes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # 公开模式禁止定时盯价，降低常驻扫价负载
+    enabled = False if settings.public_mode else body.enabled
+    interval_hours = body.interval_hours if not settings.public_mode else settings.default_scan_interval_hours
 
     task = WatchTask(
         user_id=user.id,
@@ -71,9 +79,9 @@ def create_task(
         cabin=body.cabin or "",
         top_n=body.top_n,
         target_price=body.target_price,
-        interval_hours=body.interval_hours,
-        enabled=body.enabled,
-        next_run_at=datetime.utcnow() if body.enabled else None,
+        interval_hours=interval_hours,
+        enabled=enabled,
+        next_run_at=datetime.utcnow() if enabled else None,
     )
     db.add(task)
     db.commit()
@@ -100,6 +108,9 @@ def update_task(
     task = _get_user_task(db, user, task_id)
     data = body.model_dump(exclude_unset=True)
     clear_target = data.pop("clear_target_price", False)
+    if settings.public_mode:
+        data.pop("enabled", None)
+        data.pop("interval_hours", None)
 
     if "origin" in data or "origin_codes" in data:
         try:
@@ -135,10 +146,14 @@ def update_task(
     if stay_max < stay_min:
         raise HTTPException(status_code=400, detail="stay_max 不能小于 stay_min")
 
-    if body.enabled is True and task.next_run_at is None:
-        task.next_run_at = datetime.utcnow()
-    if body.enabled is False:
+    if settings.public_mode:
+        task.enabled = False
         task.next_run_at = None
+    else:
+        if body.enabled is True and task.next_run_at is None:
+            task.next_run_at = datetime.utcnow()
+        if body.enabled is False:
+            task.next_run_at = None
 
     db.add(task)
     db.commit()
@@ -160,15 +175,41 @@ def delete_task(
 @router.post("/{task_id}/refresh", response_model=RefreshOut)
 def refresh_task(
     task_id: int,
+    request: Request,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> RefreshOut:
+    check_public_scan_limit(request)
     _get_user_task(db, user, task_id)
     try:
         run_id = enqueue_scan(task_id, trigger="manual")
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     return RefreshOut(run_id=run_id, status="pending")
+
+
+@router.post("/{task_id}/runs/{run_id}/cancel", response_model=ScanRunOut)
+def cancel_run(
+    task_id: int,
+    run_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ScanRunOut:
+    _get_user_task(db, user, task_id)
+    try:
+        run = request_cancel_run(task_id, run_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    # 重新加载 results 以符合响应模型
+    run = (
+        db.query(ScanRun)
+        .options(joinedload(ScanRun.results))
+        .filter(ScanRun.id == run.id)
+        .first()
+    )
+    assert run is not None
+    run.results.sort(key=lambda r: r.rank)
+    return ScanRunOut.model_validate(run)
 
 
 @router.get("/{task_id}/runs/latest", response_model=ScanRunOut | None)
@@ -247,7 +288,7 @@ async def run_events(
                 if text != last_payload:
                     last_payload = text
                     yield f"event: progress\ndata: {text}\n\n"
-                if r.status in ("done", "partial", "failed"):
+                if r.status in ("done", "partial", "failed", "cancelled"):
                     yield f"event: done\ndata: {text}\n\n"
                     return
             finally:

@@ -24,14 +24,18 @@ const TIMING = [
 type Status = 'queued' | 'searching' | 'verified'
 
 /**
- * 左文案 / 右核验台。
+ * 全幅核验台：短标题在上，终端演示占满宽度。
  */
 export default function SceneVerify({ active }: { active: boolean }) {
   const [status, setStatus] = useState<Record<string, Status>>({})
   const [checks, setChecks] = useState<Record<string, string[]>>({})
+  const [winner, setWinner] = useState(false)
 
   useEffect(() => {
-    if (!active) return
+    if (!active) {
+      setWinner(false)
+      return
+    }
     if (reducedMotion()) {
       const done: Record<string, Status> = {}
       const ch: Record<string, string[]> = {}
@@ -41,11 +45,13 @@ export default function SceneVerify({ active }: { active: boolean }) {
       }
       setStatus(done)
       setChecks(ch)
+      setWinner(true)
       return
     }
 
     setStatus(Object.fromEntries(ROUTES.map((r) => [r.id, 'queued'])))
     setChecks({})
+    setWinner(false)
     const timers: number[] = []
 
     ROUTES.forEach((r, i) => {
@@ -71,44 +77,46 @@ export default function SceneVerify({ active }: { active: boolean }) {
         )
       })
     })
+    timers.push(window.setTimeout(() => setWinner(true), 2900))
 
     return () => timers.forEach((t) => window.clearTimeout(t))
   }, [active])
 
   return (
-    <div className={`story-scene story-frame story-frame-split story-scene-verify story-theme-verify ${active ? 'is-active' : ''}`}>
-      <div className="story-rail story-copy">
+    <div
+      className={`story-scene story-frame story-frame-bleed story-scene-verify story-theme-verify ${active ? 'is-active' : ''}`}
+    >
+      <div className="story-bleed-head">
         <p className="story-eyebrow">
           <span className="story-eyebrow-num">04</span>
           真价核验
         </p>
         <h2 className="story-h">
-          找到了，
-          <em className="story-em">再确认是真价</em>
-          。
+          找到了，<em className="story-em">再确认是真价</em>。
         </h2>
         <p className="story-sub">打开订票页核验，能买到，才留下。</p>
         <p className="story-rail-note">携程 → 去哪儿 → 飞猪 → Google Flights</p>
       </div>
 
       <div className="story-stage">
-        <div className="story-dash" aria-live="polite">
+        <div className={`story-dash ${winner ? 'is-winner' : ''}`} aria-live="polite">
           <div className="story-dash-head">
             <span className="story-live-dot" />
-            <span>正在核验</span>
+            <span>{winner ? '核验完成' : '正在核验'}</span>
             <span className="story-dash-head-meta story-mono">演示</span>
           </div>
           <ul className="story-dash-list">
             {ROUTES.map((r) => {
               const st = status[r.id] ?? 'queued'
+              const isTop = winner && r.id === '1'
               return (
-                <li key={r.id} className={`story-dash-row is-${st}`}>
+                <li key={r.id} className={`story-dash-row is-${st} ${isTop ? 'is-top' : ''}`}>
                   <div className="story-dash-main">
                     <span className="story-mono">{r.route}</span>
                     <span className="story-dash-state">
                       {st === 'queued' && '等待'}
                       {st === 'searching' && '打开中…'}
-                      {st === 'verified' && '过关'}
+                      {st === 'verified' && (isTop ? '最低真价' : '过关')}
                     </span>
                   </div>
                   <div className="story-dash-sources">

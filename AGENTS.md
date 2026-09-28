@@ -9,7 +9,7 @@
 | `README.md` | 安装与启动 |
 | `PRD.md` | 产品需求（编码前先更新） |
 | `CHANGELOG.md` | 更新日志（**每次有意义改动必须同步**） |
-| 本文件 | 流程、质量、验收、禁止事项 |
+| 本文件 | 流程、质量、验收、禁止事项；**§16 阿里云默认热补丁部署** |
 
 项目文档可以追加更严要求，但不得降低本文标准。
 
@@ -22,7 +22,8 @@
 1. 代码行为正确，符合 PRD 与下文产品约束。  
 2. **`CHANGELOG.md` 已同步本次改动**（见 §1）。即使用户没提「写日志」也必须写。  
 3. 需要时已同步 `PRD.md`。  
-4. 已按 §2 做完自验收，结果写进回复。
+4. 已按 §2 做完自验收，结果写进回复。  
+5. 若改动需上公开站：已按 §16 **热补丁生效**，并在回复中**询问是否重建镜像**（未得同意不得默认重建）。
 
 回复中必须出现：
 
@@ -291,11 +292,64 @@ cd frontend && npm run build
 
 ---
 
-## §16 发布与回退
+## §16 发布与回退（阿里云：默认热补丁）
 
 - 按 README / Docker 约定发布；交付说明含回退方式。  
 - 发布前核对 diff 与 Changelog / Release 叙述一致。  
 - 热修复事后补齐文档、测试与 Changelog。
+
+### 16.1 Docker 文件角色（勿混淆）
+
+| 文件 | 用途 |
+|------|------|
+| `Dockerfile` | 本机/通用镜像：前端 build + Playwright Chromium |
+| `Dockerfile.public` | 公开云镜像：Chrome + xvfb，本机构建后运到 ECS |
+| `docker-compose.yml` | 本地编排（`build: .`） |
+| `docker-compose.public.yml` | 生产编排模板（`warp` + `gatefare:public`） |
+
+`VOLUME ["/app/data"]` 与 compose 的 `./data:/app/data` **只持久化 SQLite 等数据**，**不是**代码热补丁目录。
+
+### 16.2 默认部署路径：先 patch，立刻给用户看
+
+对 **已部署的公开站**（如 `flights.krisnote.online` / ECS `47.94.58.174`，目录 `/opt/flight-monitor`）：
+
+1. **默认**走热补丁，**不要**一上来就 `docker build` 整镜像（2G 机慢、易卡）。  
+2. 本机改源码并通过自测 / Changelog 后：  
+   - 把变更的后端文件同步到服务器 `/opt/flight-monitor/patch/app/...`（与镜像内路径对应，如 `backend/app/services/scanner.py` → `patch/app/services/scanner.py`）；  
+   - 确保运行中的 compose（服务器上常为 `docker-compose.yml`）对每个补丁文件有 **bind mount**，例如：  
+     `./patch/app/services/scanner.py:/app/backend/app/services/scanner.py:ro`  
+   - 前端：`npm run build` 后把 `frontend/dist` 打成 tar，`docker cp` 进容器 `/app/backend/static`（并可备份到 `patch/static.tar`）；  
+   - 配置：upsert 服务器 `.env` / compose `environment`（勿把 `.env` 提交 Git）；  
+   - `docker compose -f docker-compose.yml up -d --force-recreate web`（或等价）让进程重新加载。  
+3. 验收：`/api/health`、必要时短扫或相关 API；回复里写清已 patch 生效。  
+4. **禁止**把密钥写进仓库或 Changelog；SSH 密码/Token 只用环境变量或既有本地脚本，回复中脱敏。
+
+### 16.3 改完必须问：是否重建镜像
+
+热补丁会越积越多，镜像内代码与仓库脱节。
+
+每次完成**会影响线上**的改动并完成 patch 验收后，**必须在回复末尾明确询问用户**，不得默认重建，也不得默默跳过不问：
+
+```text
+本次已用热补丁生效。是否现在重建并替换 `gatefare:public` 镜像（把 patch 烘焙进镜像并尽量收敛挂载）？
+回复「重建」则执行；否则保持 patch，继续迭代。
+```
+
+若用户确认重建：
+
+1. 本机 `docker build --platform linux/amd64 -f Dockerfile.public -t gatefare:public .`（先保证 `backend/static` 为最新前端）；  
+2. 导出镜像并上传 ECS `docker load`；  
+3. 更新 compose 使用新镜像；**收敛**已烘焙进镜像的 patch 挂载（数据卷 `./data` 保留）；  
+4. recreate + health 验收；  
+5. 在交付说明写明：已重建镜像 / 仍保留哪些挂载。
+
+用户未明确同意前：**禁止**主动全量重建镜像。
+
+### 16.4 回退
+
+- 热补丁：恢复/删除对应 `patch/` 文件并 recreate，或临时去掉该 bind mount。  
+- 镜像：保留上一版 `gatefare:public` tar / 标签以便回滚。  
+- 数据：`/opt/flight-monitor/data` 勿随镜像删除。
 
 ---
 
@@ -309,6 +363,8 @@ Changelog：已更新 YYYY-MM-DD
 未验证：……
 数据与依赖：……
 回退：……
+线上：已热补丁生效 / 未部署（……）
+是否重建镜像：已询问用户（等待确认） / 用户确认已重建 / 用户选择暂不重建
 ```
 
 ---
@@ -325,4 +381,6 @@ Changelog：已更新 YYYY-MM-DD
 - 为过测试放宽 fail-closed  
 - 静默删除功能、测试或文档  
 - 用非 Mermaid 图冒充流程说明（PRD 内）  
-- 直接改 `node_modules`
+- 直接改 `node_modules`  
+- **未询问用户就重建生产镜像**，或**影响线上却只改本机、不 patch 导致用户看不到**  
+- 把 `VOLUME /app/data` 误当成代码热更新目录

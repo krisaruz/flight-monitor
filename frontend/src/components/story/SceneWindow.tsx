@@ -1,4 +1,12 @@
-import { useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
+import { reducedMotion } from '../../utils/format'
 
 const DAYS = [
   { label: '7月15日', short: '15', price: 1680 },
@@ -16,13 +24,19 @@ const DAYS = [
 ]
 
 const MAX_PRICE = 2200
+const DEMO_START = 3 // 18
+const DEMO_END = 8 // 23
+
+type Phase = 'boot' | 'grow' | 'wide' | 'narrow' | 'lock' | 'ready'
 
 /**
- * 拖拽用 transform（无 left/width/height 布局抖动）；pointer 几何在 down 时缓存。
+ * 区间图：像第一页一样有叙事节拍——柱生长 → 拉满窗 → 收窄到甜蜜区间 → 锁定最低价。
+ * 演示结束后才开放拖拽。
  */
 export default function SceneWindow({ active }: { active: boolean }) {
-  const [start, setStart] = useState(3)
-  const [end, setEnd] = useState(8)
+  const [start, setStart] = useState(0)
+  const [end, setEnd] = useState(DAYS.length - 1)
+  const [phase, setPhase] = useState<Phase>('boot')
   const [dragging, setDragging] = useState(false)
   const trackRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<'start' | 'end' | null>(null)
@@ -35,6 +49,64 @@ export default function SceneWindow({ active }: { active: boolean }) {
 
   startRef.current = start
   endRef.current = end
+
+  const interactive = phase === 'ready'
+
+  useEffect(() => {
+    if (!active) {
+      setPhase('boot')
+      setStart(0)
+      setEnd(DAYS.length - 1)
+      return
+    }
+
+    if (reducedMotion()) {
+      setStart(DEMO_START)
+      setEnd(DEMO_END)
+      setPhase('ready')
+      return
+    }
+
+    setPhase('boot')
+    setStart(0)
+    setEnd(DAYS.length - 1)
+    const timers: number[] = []
+
+    timers.push(window.setTimeout(() => setPhase('grow'), 120))
+    timers.push(window.setTimeout(() => setPhase('wide'), 720))
+
+    // 逐步收窄：像手在拖两端
+    const narrowSteps: [number, number][] = [
+      [1, 10],
+      [2, 9],
+      [3, 9],
+      [3, 8],
+    ]
+    let t = 1100
+    narrowSteps.forEach(([s, e], i) => {
+      timers.push(
+        window.setTimeout(() => {
+          setPhase('narrow')
+          setStart(s)
+          setEnd(e)
+        }, t),
+      )
+      t += i === narrowSteps.length - 1 ? 420 : 280
+    })
+
+    timers.push(
+      window.setTimeout(() => {
+        setStart(DEMO_START)
+        setEnd(DEMO_END)
+        setPhase('lock')
+      }, t),
+    )
+    t += 700
+
+    timers.push(window.setTimeout(() => setPhase('ready'), t))
+
+    return () => timers.forEach((id) => window.clearTimeout(id))
+  }, [active])
 
   const slice = useMemo(() => {
     const a = Math.min(start, end)
@@ -68,6 +140,7 @@ export default function SceneWindow({ active }: { active: boolean }) {
   }
 
   function onPointerDown(which: 'start' | 'end', e: ReactPointerEvent<HTMLButtonElement>) {
+    if (!interactive) return
     e.preventDefault()
     const el = trackRef.current
     if (el) {
@@ -101,9 +174,14 @@ export default function SceneWindow({ active }: { active: boolean }) {
   const leftPct = (Math.min(start, end) / (DAYS.length - 1)) * 100
   const spanPct = ((Math.max(start, end) - Math.min(start, end)) / (DAYS.length - 1)) * 100
   const rightPct = leftPct + spanPct
+  const showResult = phase === 'lock' || phase === 'ready'
+  const barsGrown = phase !== 'boot'
 
   return (
-    <div className={`story-scene story-frame story-frame-split story-scene-window story-theme-window ${active ? 'is-active' : ''}`}>
+    <div
+      className={`story-scene story-frame story-frame-stack story-scene-window story-theme-window ${active ? 'is-active' : ''}`}
+      data-phase={phase}
+    >
       <div className="story-rail story-copy">
         <p className="story-eyebrow">
           <span className="story-eyebrow-num">02</span>
@@ -115,11 +193,23 @@ export default function SceneWindow({ active }: { active: boolean }) {
           。
         </h2>
         <p className="story-sub">拖出区间，我来替你找。</p>
-        <p className="story-rail-note">拖一拖两端就好</p>
+        <p className="story-rail-note">
+          {interactive ? '拖一拖两端就好' : '先看区间怎么收出低价…'}
+        </p>
       </div>
 
       <div className="story-stage">
-        <div className={`story-window-demo ${dragging ? 'is-dragging' : 'is-settling'}`}>
+        <div
+          className={[
+            'story-window-demo',
+            dragging ? 'is-dragging' : 'is-settling',
+            barsGrown ? 'is-grown' : '',
+            showResult ? 'is-locked' : '',
+            interactive ? 'is-interactive' : 'is-demoing',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+        >
           <div
             className="story-range"
             ref={trackRef}
@@ -139,6 +229,7 @@ export default function SceneWindow({ active }: { active: boolean }) {
               className="story-range-handle"
               style={{ '--p': leftPct / 100 } as CSSProperties}
               aria-label="区间起点"
+              disabled={!interactive}
               onPointerDown={(e) => onPointerDown('start', e)}
             />
             <button
@@ -146,6 +237,7 @@ export default function SceneWindow({ active }: { active: boolean }) {
               className="story-range-handle"
               style={{ '--p': rightPct / 100 } as CSSProperties}
               aria-label="区间终点"
+              disabled={!interactive}
               onPointerDown={(e) => onPointerDown('end', e)}
             />
           </div>
@@ -153,14 +245,21 @@ export default function SceneWindow({ active }: { active: boolean }) {
           <div className="story-bars" role="img" aria-label="所选日期窗内的价格">
             {DAYS.map((d, i) => {
               const inWin = i >= Math.min(start, end) && i <= Math.max(start, end)
-              const isBest = inWin && d.label === best.label
+              const isBest = showResult && inWin && d.label === best.label
               const ratio = d.price / MAX_PRICE
               return (
-                <div key={d.label} className={`story-bar-col ${inWin ? 'in' : 'out'}`}>
+                <div
+                  key={d.label}
+                  className={`story-bar-col ${inWin ? 'in' : 'out'} ${isBest ? 'is-best-col' : ''}`}
+                  style={{ ['--i' as string]: String(i) }}
+                >
                   <div className="story-bar-slot">
                     <div
                       className={`story-bar ${isBest ? 'is-best' : ''}`}
-                      style={{ transform: `scaleY(${ratio})` }}
+                      style={{
+                        transform: barsGrown ? `scaleY(${ratio})` : 'scaleY(0.02)',
+                        transitionDelay: barsGrown ? `${i * 45}ms` : '0ms',
+                      }}
                     />
                   </div>
                   <span className="story-bar-label">{d.short}</span>
@@ -169,7 +268,7 @@ export default function SceneWindow({ active }: { active: boolean }) {
             })}
           </div>
 
-          <div className="story-window-result">
+          <div className={`story-window-result ${showResult ? 'is-in' : ''}`} aria-live="polite">
             <span className="story-muted">区间内最划算</span>
             <strong>
               {best.label}

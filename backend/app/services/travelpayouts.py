@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 from urllib.parse import quote
@@ -18,6 +20,7 @@ from app.services.flight_search import FlightOption, FlightSegment, resolve_airp
 _log = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int], None]
+StatusCallback = Callable[[str], None]
 
 BASE = "https://api.travelpayouts.com"
 
@@ -54,25 +57,46 @@ def _network_error_hint(err: BaseException) -> str:
         )
     return text
 
-# 机场三字码 → Travelpayouts 常用城市码
+# 机场三字码 → Travelpayouts 常用城市码（仅 TP API 边界使用）
 AIRPORT_TO_CITY = {
     "KIX": "OSA",
     "ITM": "OSA",
     "NRT": "TYO",
     "HND": "TYO",
+    "CTS": "SPK",
+    "CGK": "JKT",
+    "JFK": "NYC",
+    "EWR": "NYC",
+    "LGA": "NYC",
+    "ORD": "CHI",
+    "MDW": "CHI",
+    "IAD": "WAS",
+    "DCA": "WAS",
+    "YYZ": "YTO",
+    "YUL": "YMQ",
+    "LHR": "LON",
+    "LGW": "LON",
+    "CDG": "PAR",
+    "ORY": "PAR",
+    "FCO": "ROM",
+    "MXP": "MIL",
+    "GRU": "SAO",
+    "GIG": "RIO",
     "PVG": "SHA",
     "SHA": "SHA",
     "PEK": "BJS",
     "PKX": "BJS",
     "ICN": "SEL",
     "GMP": "SEL",
-    "XIY": "SIA",  # 西安：机场码 → Travelpayouts 城市码
+    "XIY": "SIA",
     "TFU": "CTU",
 }
 
 
 def to_city_code(code: str) -> str:
-    c = resolve_airport(code)
+    from app.services.flight_search import canonical_airport_code
+
+    c = canonical_airport_code(code)
     return AIRPORT_TO_CITY.get(c, c)
 
 
@@ -220,6 +244,55 @@ def select_verify_pool(
     return pool[:attempts]
 
 
+def expand_neighbor_combos(
+    seeds: list[tuple[str, str]],
+    all_combos: list[tuple[str, str]],
+    max_extra: int = 12,
+) -> list[tuple[str, str]]:
+    """
+    对已核验低价日期做邻域加密：去程 ±2 天、停留 ±1 天（仍须落在 all_combos 内）。
+    """
+    if max_extra <= 0 or not seeds or not all_combos:
+        return []
+    combo_set = set(all_combos)
+    seen = set(seeds)
+    out: list[tuple[str, str]] = []
+    for dep, ret in seeds:
+        try:
+            d0 = datetime.strptime(dep, "%Y-%m-%d")
+            r0 = datetime.strptime(ret, "%Y-%m-%d")
+        except ValueError:
+            continue
+        stay = max(1, (r0 - d0).days)
+        for dd in (-2, -1, 1, 2):
+            for ds in (-1, 0, 1):
+                nd = d0 + timedelta(days=dd)
+                nr = nd + timedelta(days=max(1, stay + ds))
+                key = (nd.strftime("%Y-%m-%d"), nr.strftime("%Y-%m-%d"))
+                if key in combo_set and key not in seen:
+                    seen.add(key)
+                    out.append(key)
+                    if len(out) >= max_extra:
+                        return out
+    return out
+
+
+def build_options_for_combos(
+    combos: list[tuple[str, str]],
+    origin: str,
+    dest: str,
+    adults: int,
+    currency: str = "CNY",
+) -> list[FlightOption]:
+    """把 (out, ret) 列表转成可核验骨架选项（单 OD）。"""
+    o = resolve_airport(origin)
+    d = resolve_airport(dest)
+    return [
+        make_skeleton_option(o, d, dep, ret, adults=adults, cache_price=0, currency=currency)
+        for dep, ret in combos
+    ]
+
+
 def google_flights_url(
     origin: str,
     dest: str,
@@ -227,9 +300,27 @@ def google_flights_url(
     return_date: str,
     adults: int = 1,
 ) -> str:
-    o = resolve_airport(origin)
-    d = resolve_airport(dest)
+    from app.services.flight_search import resolve_google_airport
+
+    o = resolve_google_airport(origin)
+    d = resolve_google_airport(dest)
     q = f"Flights to {d} from {o} on {outbound_date} through {return_date}"
+    if adults > 1:
+        q += f" for {adults} adults"
+    return f"https://www.google.com/travel/flights?hl=zh-CN&curr=CNY&q={quote(q)}"
+
+
+def google_flights_one_way_url(
+    origin: str,
+    dest: str,
+    outbound_date: str,
+    adults: int = 1,
+) -> str:
+    from app.services.flight_search import resolve_google_airport
+
+    o = resolve_google_airport(origin)
+    d = resolve_google_airport(dest)
+    q = f"Flights to {d} from {o} on {outbound_date} one way"
     if adults > 1:
         q += f" for {adults} adults"
     return f"https://www.google.com/travel/flights?hl=zh-CN&curr=CNY&q={quote(q)}"
@@ -276,12 +367,72 @@ def _flight_code(airline: str, flight_no: str) -> str:
 
 
 class TravelpayoutsClient:
-    def __init__(self, token: str, request_delay_sec: float = 0.2, market: str = "cn"):
+    def __init__(
+        self,
+        token: str,
+        request_delay_sec: float = 0.2,
+        market: str = "cn",
+        concurrency: int = 6,
+    ):
         self.token = token.strip()
         self.request_delay_sec = max(0.05, float(request_delay_sec))
         self.market = (market or "cn").strip().lower() or "cn"
+        self.concurrency = max(1, min(16, int(concurrency)))
+        self._throttle_lock = threading.Lock()
+        self._next_slot = 0.0
+        self._status_cb: Optional[StatusCallback] = None
 
-    def _get(self, path: str, params: dict[str, Any], retries: int = 3) -> dict[str, Any]:
+    def _emit_status(self, message: str) -> None:
+        cb = self._status_cb
+        if cb:
+            try:
+                cb(message)
+            except Exception:
+                _log.debug("status callback failed", exc_info=True)
+
+    def _acquire_request_slot(self) -> None:
+        """全局限速：并行 worker 共享发请求槽位，避免把 delay 乘没。"""
+        while True:
+            with self._throttle_lock:
+                now = time.monotonic()
+                if now >= self._next_slot:
+                    self._next_slot = now + self.request_delay_sec
+                    return
+                wait = self._next_slot - now
+            time.sleep(min(wait, 1.0))
+
+    def _note_rate_limit(self, seconds: float) -> None:
+        pause = max(1.0, float(seconds))
+        with self._throttle_lock:
+            self._next_slot = max(self._next_slot, time.monotonic() + pause)
+        msg = f"缓存接口限流，暂停约 {int(round(pause))} 秒后重试…"
+        _log.warning("Travelpayouts rate limit: pause=%.1fs", pause)
+        self._emit_status(msg)
+
+    @staticmethod
+    def _retry_after_seconds(err: urllib.error.HTTPError, attempt: int) -> float:
+        raw = (err.headers.get("Retry-After") if err.headers else None) or ""
+        try:
+            if raw.strip().isdigit():
+                return max(1.0, float(raw.strip()))
+        except (TypeError, ValueError):
+            pass
+        # 指数退避，上限 30s
+        return min(30.0, float(2 ** attempt))
+
+    @staticmethod
+    def _is_rate_limit_error(code: int, body: str) -> bool:
+        if code == 429:
+            return True
+        if code in {403, 503}:
+            low = (body or "").lower()
+            return any(
+                k in low
+                for k in ("rate limit", "too many requests", "throttle", "限流", "频率")
+            )
+        return False
+
+    def _get(self, path: str, params: dict[str, Any], retries: int = 4) -> dict[str, Any]:
         q = dict(params)
         q["token"] = self.token
         url = f"{BASE}{path}?{urllib.parse.urlencode(q)}"
@@ -289,11 +440,23 @@ class TravelpayoutsClient:
         opener = _http_opener()
         last_err: Exception | None = None
         for attempt in range(1, retries + 1):
+            self._acquire_request_slot()
             try:
                 with opener.open(req, timeout=45) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", errors="replace")[:500]
+                if self._is_rate_limit_error(e.code, body):
+                    wait = self._retry_after_seconds(e, attempt)
+                    self._note_rate_limit(wait)
+                    if attempt < retries:
+                        time.sleep(wait)
+                        continue
+                    raise RuntimeError(
+                        "Travelpayouts 请求过于频繁（限流）。"
+                        "请稍后再扫，或调低 TRAVELPAYOUTS_CONCURRENCY / 增大 TRAVELPAYOUTS_REQUEST_DELAY。"
+                        f" HTTP {e.code}: {body}"
+                    ) from e
                 raise RuntimeError(f"Travelpayouts HTTP {e.code}: {body}") from e
             except (urllib.error.URLError, TimeoutError, OSError) as e:
                 last_err = e
@@ -307,29 +470,92 @@ class TravelpayoutsClient:
         origin: str,
         destination: str,
         departure_at: str,
-        return_at: str,
+        return_at: str = "",
         currency: str = "CNY",
         limit: int = 5,
+        one_way: bool = False,
     ) -> list[dict[str, Any]]:
-        """按具体往返日期查缓存价（比 grouped_prices 更密）。"""
+        """按具体日期查缓存价；one_way=True 时只查单程（日历主源）。"""
         params: dict[str, Any] = {
             "origin": to_city_code(origin),
             "destination": to_city_code(destination),
             "departure_at": departure_at,
-            "return_at": return_at,
             "unique": "false",
             "sorting": "price",
             "direct": "false",
-            "one_way": "false",
+            "one_way": "true" if one_way else "false",
             "currency": currency.lower(),
             "limit": max(1, min(30, int(limit))),
             "page": 1,
         }
+        if not one_way:
+            params["return_at"] = return_at
         data = self._get("/aviasales/v3/prices_for_dates", params)
         if data.get("success") is False:
             raise RuntimeError(f"Travelpayouts 返回失败: {data.get('error') or data}")
         raw = data.get("data") or []
         return raw if isinstance(raw, list) else []
+
+    def fetch_one_way_min_price(
+        self,
+        origin: str,
+        destination: str,
+        departure_at: str,
+        currency: str = "CNY",
+    ) -> float | None:
+        """单日单程最低缓存价；无价返回 None。"""
+        rows = self.fetch_prices_for_dates(
+            origin,
+            destination,
+            departure_at,
+            return_at="",
+            currency=currency,
+            limit=5,
+            one_way=True,
+        )
+        best: float | None = None
+        for row in rows:
+            try:
+                price = float(row.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+            # 若 API 仍带回程字段，仍可用其 price（单程请求下通常为单程价）
+            dep = str(row.get("departure_at") or "")[:10]
+            if dep and dep != departure_at:
+                continue
+            if best is None or price < best:
+                best = price
+        return best
+
+    def scan_leg_calendar(
+        self,
+        origin: str,
+        destination: str,
+        start_date: datetime,
+        end_date: datetime,
+        currency: str = "CNY",
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> dict[str, float]:
+        """
+        按日拉取单程最低价日历。
+        空日不写入；网络错误 fail-closed。
+        """
+        from app.services.calendar_match import iter_day_strings
+
+        days = iter_day_strings(start_date, end_date)
+        total = max(1, len(days))
+        if on_progress:
+            on_progress(0, total)
+        cal: dict[str, float] = {}
+        for i, day in enumerate(days, 1):
+            price = self.fetch_one_way_min_price(origin, destination, day, currency=currency)
+            if price is not None and price > 0:
+                cal[day] = float(price)
+            if on_progress:
+                on_progress(i, total)
+        return cal
 
     def fetch_grouped_month(
         self,
@@ -362,6 +588,34 @@ class TravelpayoutsClient:
             return list(raw.values())
         return []
 
+    def _best_option_for_combo(
+        self,
+        origin: str,
+        destination: str,
+        dep: str,
+        ret: str,
+        currency: str,
+        adults: int,
+    ) -> FlightOption | None:
+        rows = self.fetch_prices_for_dates(
+            origin,
+            destination,
+            dep,
+            ret,
+            currency=currency,
+            limit=5,
+        )
+        best: FlightOption | None = None
+        for row in rows:
+            opt = self._row_to_option(row, origin, destination, currency, adults)
+            if not opt:
+                continue
+            if opt.outbound_date != dep or opt.return_date != ret:
+                continue
+            if best is None or opt.cache_price < best.cache_price:
+                best = opt
+        return best
+
     def scan_window(
         self,
         origin: str,
@@ -373,11 +627,12 @@ class TravelpayoutsClient:
         currency: str = "CNY",
         adults: int = 1,
         on_progress: Optional[ProgressCallback] = None,
+        on_status: Optional[StatusCallback] = None,
         market: str | None = None,  # noqa: ARG002 — 保留签名兼容
     ) -> list[FlightOption]:
         """
-        按「出发日 × 停留」逐组调用 prices_for_dates。
-        空结果可跳过；网络/HTTP 失败重试后仍失败则整窗失败（fail-closed）。
+        按「出发日 × 停留」调用 prices_for_dates；默认有限并行 + 全局限速槽。
+        空结果可跳过；网络/HTTP/限流耗尽失败则整窗失败（fail-closed）。
         """
         combos = iter_date_combos(start_date, end_date, stay_min, stay_max)
         if not combos:
@@ -386,33 +641,51 @@ class TravelpayoutsClient:
         if on_progress:
             on_progress(0, total)
 
+        prev_status = self._status_cb
+        self._status_cb = on_status
         results: list[FlightOption] = []
-        for i, (dep, ret) in enumerate(combos, 1):
-            rows = self.fetch_prices_for_dates(
-                origin,
-                destination,
-                dep,
-                ret,
-                currency=currency,
-                limit=5,
-            )
-            # 同一日期组合取最便宜一条
-            best: FlightOption | None = None
-            for row in rows:
-                opt = self._row_to_option(row, origin, destination, currency, adults)
-                if not opt:
-                    continue
-                if opt.outbound_date != dep or opt.return_date != ret:
-                    continue
-                if best is None or opt.cache_price < best.cache_price:
-                    best = opt
-            if best:
-                results.append(best)
+        done_lock = threading.Lock()
+        done_count = 0
+        workers = min(self.concurrency, total)
 
+        def _one(dep: str, ret: str) -> FlightOption | None:
+            return self._best_option_for_combo(origin, destination, dep, ret, currency, adults)
+
+        def _mark_done() -> None:
+            nonlocal done_count
+            with done_lock:
+                done_count += 1
+                cur = done_count
             if on_progress:
-                on_progress(i, total)
-            if i < total:
-                time.sleep(self.request_delay_sec)
+                on_progress(cur, total)
+
+        try:
+            if workers <= 1:
+                for dep, ret in combos:
+                    best = _one(dep, ret)
+                    if best:
+                        results.append(best)
+                    _mark_done()
+                return results
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_one, dep, ret): (dep, ret) for dep, ret in combos}
+                try:
+                    for fut in as_completed(futures):
+                        try:
+                            best = fut.result()
+                        except Exception:
+                            for pending in futures:
+                                pending.cancel()
+                            raise
+                        if best:
+                            results.append(best)
+                        _mark_done()
+                except Exception:
+                    # 尽快打断仍在跑的请求槽等待
+                    raise
+        finally:
+            self._status_cb = prev_status
 
         return results
 

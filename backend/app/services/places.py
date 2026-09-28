@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.services.cn_cities import CN_MAJOR_HUB_CODES, load_cn_cities
-from app.services.flight_search import resolve_airport
+from app.services.cn_cities import CN_JSON_CITY_TO_AIRPORT, CN_MAJOR_HUB_CODES, load_cn_cities
+from app.services.flight_search import canonical_airport_code, resolve_airport
 
 
 @dataclass(frozen=True)
@@ -23,18 +23,19 @@ class CountryPlace:
     airports: tuple[AirportPlace, ...]
 
 
-# 面向中国旅客的常用目的地（城市码优先，供 Travelpayouts / OTA 深链）
+# 面向中国旅客的常用目的地：主码一律用 IATA 机场码（都市圈取主机场）。
+# Travelpayouts 城市码仅在 TP 请求边界经 to_city_code() 转换，禁止作为任务存储主码。
 COUNTRIES: tuple[CountryPlace, ...] = (
     CountryPlace(
         "JP",
         "日本",
         ("japan", "jp", "霓虹"),
         (
-            AirportPlace("TYO", "东京", ("东京", "tokyo", "nrt", "hnd")),
-            AirportPlace("OSA", "大阪", ("大阪", "osaka", "kix", "itm")),
+            AirportPlace("NRT", "东京", ("东京", "tokyo", "tyo", "nrt", "hnd", "成田")),
+            AirportPlace("KIX", "大阪", ("大阪", "osaka", "osa", "kix", "itm", "关西")),
             AirportPlace("NGO", "名古屋", ("名古屋", "nagoya")),
             AirportPlace("FUK", "福冈", ("福冈", "fukuoka")),
-            AirportPlace("SPK", "札幌", ("札幌", "sapporo", "cts")),
+            AirportPlace("CTS", "札幌", ("札幌", "sapporo", "spk", "cts")),
             AirportPlace("OKA", "冲绳", ("冲绳", "okinawa", "那霸")),
         ),
     ),
@@ -43,7 +44,7 @@ COUNTRIES: tuple[CountryPlace, ...] = (
         "韩国",
         ("korea", "south korea", "kr", "南韩"),
         (
-            AirportPlace("SEL", "首尔", ("首尔", "seoul", "icn", "gmp")),
+            AirportPlace("ICN", "首尔", ("首尔", "seoul", "sel", "icn", "gmp", "仁川")),
             AirportPlace("PUS", "釜山", ("釜山", "busan", "pus")),
             AirportPlace("CJU", "济州", ("济州", "jeju")),
         ),
@@ -101,7 +102,7 @@ COUNTRIES: tuple[CountryPlace, ...] = (
         "印度尼西亚",
         ("indonesia", "id", "印尼"),
         (
-            AirportPlace("JKT", "雅加达", ("雅加达", "jakarta", "cgk")),
+            AirportPlace("CGK", "雅加达", ("雅加达", "jakarta", "jkt", "cgk")),
             AirportPlace("DPS", "巴厘岛", ("巴厘", "bali", "denpasar")),
         ),
     ),
@@ -166,18 +167,163 @@ COUNTRIES: tuple[CountryPlace, ...] = (
             AirportPlace("AUH", "阿布扎比", ("阿布扎比", "abu dhabi")),
         ),
     ),
+    CountryPlace(
+        "US",
+        "美国",
+        ("usa", "us", "america", "united states", "美利坚"),
+        (
+            AirportPlace("JFK", "纽约", ("纽约", "new york", "nyc", "jfk", "ewr", "lga")),
+            AirportPlace("LAX", "洛杉矶", ("洛杉矶", "los angeles", "lax")),
+            AirportPlace("SFO", "旧金山", ("旧金山", "san francisco", "湾区")),
+            AirportPlace("ORD", "芝加哥", ("芝加哥", "chicago", "chi", "ord", "mdw")),
+            AirportPlace("SEA", "西雅图", ("西雅图", "seattle")),
+            AirportPlace("BOS", "波士顿", ("波士顿", "boston")),
+            AirportPlace("MIA", "迈阿密", ("迈阿密", "miami")),
+            AirportPlace("IAD", "华盛顿", ("华盛顿", "washington", "was", "iad", "dca")),
+            AirportPlace("DFW", "达拉斯", ("达拉斯", "dallas")),
+            AirportPlace("ATL", "亚特兰大", ("亚特兰大", "atlanta")),
+            AirportPlace("DEN", "丹佛", ("丹佛", "denver")),
+            AirportPlace("LAS", "拉斯维加斯", ("拉斯维加斯", "las vegas")),
+            AirportPlace("HNL", "夏威夷·火奴鲁鲁", ("夏威夷", "火奴鲁鲁", "honolulu", "hawaii")),
+        ),
+    ),
+    CountryPlace(
+        "CA",
+        "加拿大",
+        ("canada", "ca"),
+        (
+            AirportPlace("YYZ", "多伦多", ("多伦多", "toronto", "yto", "yyz")),
+            AirportPlace("YVR", "温哥华", ("温哥华", "vancouver")),
+            AirportPlace("YUL", "蒙特利尔", ("蒙特利尔", "montreal", "ymq", "yul")),
+        ),
+    ),
+    CountryPlace(
+        "GB",
+        "英国",
+        ("uk", "gb", "britain", "united kingdom", "英格兰"),
+        (
+            AirportPlace("LHR", "伦敦", ("伦敦", "london", "lon", "lhr", "lgw")),
+            AirportPlace("MAN", "曼彻斯特", ("曼彻斯特", "manchester")),
+            AirportPlace("EDI", "爱丁堡", ("爱丁堡", "edinburgh")),
+        ),
+    ),
+    CountryPlace(
+        "FR",
+        "法国",
+        ("france", "fr"),
+        (
+            AirportPlace("CDG", "巴黎", ("巴黎", "paris", "par", "cdg", "ory")),
+            AirportPlace("NCE", "尼斯", ("尼斯", "nice")),
+        ),
+    ),
+    CountryPlace(
+        "DE",
+        "德国",
+        ("germany", "de", "Deutschland"),
+        (
+            AirportPlace("FRA", "法兰克福", ("法兰克福", "frankfurt")),
+            AirportPlace("MUC", "慕尼黑", ("慕尼黑", "munich")),
+            AirportPlace("BER", "柏林", ("柏林", "berlin")),
+        ),
+    ),
+    CountryPlace(
+        "IT",
+        "意大利",
+        ("italy", "it"),
+        (
+            AirportPlace("FCO", "罗马", ("罗马", "rome", "rom", "fco")),
+            AirportPlace("MXP", "米兰", ("米兰", "milan", "mil", "mxp")),
+        ),
+    ),
+    CountryPlace(
+        "ES",
+        "西班牙",
+        ("spain", "es"),
+        (
+            AirportPlace("MAD", "马德里", ("马德里", "madrid")),
+            AirportPlace("BCN", "巴塞罗那", ("巴塞罗那", "barcelona")),
+        ),
+    ),
+    CountryPlace(
+        "NL",
+        "荷兰",
+        ("netherlands", "nl", "Holland"),
+        (AirportPlace("AMS", "阿姆斯特丹", ("阿姆斯特丹", "amsterdam")),),
+    ),
+    CountryPlace(
+        "CH",
+        "瑞士",
+        ("switzerland", "ch"),
+        (
+            AirportPlace("ZRH", "苏黎世", ("苏黎世", "zurich")),
+            AirportPlace("GVA", "日内瓦", ("日内瓦", "geneva")),
+        ),
+    ),
+    CountryPlace(
+        "TR",
+        "土耳其",
+        ("turkey", "tr", "Türkiye"),
+        (AirportPlace("IST", "伊斯坦布尔", ("伊斯坦布尔", "istanbul")),),
+    ),
+    CountryPlace(
+        "IN",
+        "印度",
+        ("india", "in"),
+        (
+            AirportPlace("DEL", "德里", ("德里", "delhi", "新德里")),
+            AirportPlace("BOM", "孟买", ("孟买", "mumbai", "bombay")),
+            AirportPlace("BLR", "班加罗尔", ("班加罗尔", "bangalore", "bengaluru")),
+        ),
+    ),
+    CountryPlace(
+        "QA",
+        "卡塔尔",
+        ("qatar", "qa"),
+        (AirportPlace("DOH", "多哈", ("多哈", "doha")),),
+    ),
+    CountryPlace(
+        "EG",
+        "埃及",
+        ("egypt", "eg"),
+        (AirportPlace("CAI", "开罗", ("开罗", "cairo")),),
+    ),
+    CountryPlace(
+        "MX",
+        "墨西哥",
+        ("mexico", "mx"),
+        (
+            AirportPlace("MEX", "墨西哥城", ("墨西哥城", "mexico city")),
+            AirportPlace("CUN", "坎昆", ("坎昆", "cancun")),
+        ),
+    ),
+    CountryPlace(
+        "BR",
+        "巴西",
+        ("brazil", "br"),
+        (
+            AirportPlace("GRU", "圣保罗", ("圣保罗", "sao paulo", "sao", "gru")),
+            AirportPlace("GIG", "里约热内卢", ("里约", "rio", "gig")),
+        ),
+    ),
 )
 
 
 def _cn_all_airports() -> tuple[AirportPlace, ...]:
-    return tuple(
-        AirportPlace(
-            str(row["code"]),
-            str(row["name_zh"]),
-            tuple(row["aliases"]),
+    out: list[AirportPlace] = []
+    for row in load_cn_cities():
+        raw = str(row["code"]).strip().upper()
+        code = CN_JSON_CITY_TO_AIRPORT.get(raw, raw)
+        aliases = list(row["aliases"])
+        if raw != code:
+            aliases = [raw.lower(), *aliases]
+        out.append(
+            AirportPlace(
+                code,
+                str(row["name_zh"]),
+                tuple(aliases),
+            )
         )
-        for row in load_cn_cities()
-    )
+    return tuple(out)
 
 
 def _cn_by_code() -> dict[str, AirportPlace]:
@@ -337,7 +483,8 @@ def expand_codes(codes_csv: str | None, label: str | None = None) -> list[str]:
             p = part.strip()
             if not p:
                 continue
-            code = resolve_airport(p)
+            # 旧任务可能存 OSA/TYO 等城市码 → 规范成主机场
+            code = canonical_airport_code(p)
             if code and code not in out:
                 out.append(code)
         if out:
@@ -368,7 +515,7 @@ def expand_codes(codes_csv: str | None, label: str | None = None) -> list[str]:
         if q in names:
             return [a.code]
 
-    return [resolve_airport(label_s)]
+    return [canonical_airport_code(label_s)]
 
 
 def normalize_place(label: str, codes_csv: str | None = None) -> tuple[str, str]:

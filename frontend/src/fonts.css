@@ -1,0 +1,19 @@
+/* Gatefare 字体：拉丁用 Playfair / Plex Mono，中文用 Noto 简体子集（控制体积） */
+
+@import '@fontsource/playfair-display/latin-400.css';
+@import '@fontsource/playfair-display/latin-600.css';
+@import '@fontsource/playfair-display/latin-700.css';
+@import '@fontsource/playfair-display/latin-400-italic.css';
+@import '@fontsource/playfair-display/latin-500-italic.css';
+
+@import '@fontsource/ibm-plex-mono/latin-400.css';
+@import '@fontsource/ibm-plex-mono/latin-500.css';
+@import '@fontsource/ibm-plex-mono/latin-600.css';
+
+@import '@fontsource/noto-sans-sc/chinese-simplified-400.css';
+@import '@fontsource/noto-sans-sc/chinese-simplified-500.css';
+@import '@fontsource/noto-sans-sc/latin-400.css';
+@import '@fontsource/noto-sans-sc/latin-500.css';
+
+@import '@fontsource/noto-serif-sc/chinese-simplified-500.css';
+@import '@fontsource/noto-serif-sc/latin-500.css';

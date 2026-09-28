@@ -17,7 +17,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
-  const res = await fetch(path, { ...init, headers })
+  const res = await fetch(path, { ...init, headers, credentials: 'include' })
   if (res.status === 204) return undefined as T
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
@@ -94,6 +94,7 @@ export type Health = {
   provider: string
   pipeline?: string
   demo: boolean
+  public_mode?: boolean
   travelpayouts_configured: boolean
   travelpayouts_ok?: boolean
   playwright_ok?: boolean
@@ -138,6 +139,8 @@ export const api = {
   deleteTask: (id: number) => request<void>(`/api/tasks/${id}`, { method: 'DELETE' }),
   refreshTask: (id: number) =>
     request<{ run_id: number; status: string }>(`/api/tasks/${id}/refresh`, { method: 'POST' }),
+  cancelRun: (taskId: number, runId: number) =>
+    request<ScanRun>(`/api/tasks/${taskId}/runs/${runId}/cancel`, { method: 'POST' }),
   latestRun: (id: number) => request<ScanRun | null>(`/api/tasks/${id}/runs/latest`),
   getRun: (taskId: number, runId: number) =>
     request<ScanRun>(`/api/tasks/${taskId}/runs/${runId}`),

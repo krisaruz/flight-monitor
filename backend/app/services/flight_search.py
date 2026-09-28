@@ -83,28 +83,37 @@ class FlightOption:
         if self.summary_outbound:
             return self.summary_outbound
         if not self.outbound_segments:
-            return "N/A"
+            # 空串而非 N/A：避免 fast 核验（只有价、无班次）落库后前端显示「回 N/A」
+            return ""
         segs = self.outbound_segments
         stops = sum(s.stops for s in segs) + len(segs) - 1
-        airlines = "/".join(dict.fromkeys(s.airline for s in segs))
+        airlines = "/".join(dict.fromkeys(s.airline for s in segs if s.airline and s.airline != "??"))
+        flight_nos = "/".join(
+            dict.fromkeys(s.flight_no for s in segs if s.flight_no and s.flight_no != "N/A")
+        )
         dep = segs[0].departure_time[11:16] if len(segs[0].departure_time) > 11 else segs[0].departure_time
         arr = segs[-1].arrival_time[11:16] if len(segs[-1].arrival_time) > 11 else segs[-1].arrival_time
         stop_text = "直飞" if stops == 0 else f"转{stops}次"
-        return f"{airlines} {dep}-{arr} ({stop_text})"
+        head = " ".join(p for p in (airlines, flight_nos) if p).strip() or "航班"
+        return f"{head} {dep}→{arr} ({stop_text})"
 
     @property
     def return_summary(self) -> str:
         if self.summary_return:
             return self.summary_return
         if not self.return_segments:
-            return "N/A"
+            return ""
         segs = self.return_segments
         stops = sum(s.stops for s in segs) + len(segs) - 1
-        airlines = "/".join(dict.fromkeys(s.airline for s in segs))
+        airlines = "/".join(dict.fromkeys(s.airline for s in segs if s.airline and s.airline != "??"))
+        flight_nos = "/".join(
+            dict.fromkeys(s.flight_no for s in segs if s.flight_no and s.flight_no != "N/A")
+        )
         dep = segs[0].departure_time[11:16] if len(segs[0].departure_time) > 11 else segs[0].departure_time
         arr = segs[-1].arrival_time[11:16] if len(segs[-1].arrival_time) > 11 else segs[-1].arrival_time
         stop_text = "直飞" if stops == 0 else f"转{stops}次"
-        return f"{airlines} {dep}-{arr} ({stop_text})"
+        head = " ".join(p for p in (airlines, flight_nos) if p).strip() or "航班"
+        return f"{head} {dep}→{arr} ({stop_text})"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -640,3 +649,37 @@ def resolve_airport(name: str) -> str:
     if len(name.strip()) == 3 and name.strip().isalpha():
         return name.strip().upper()
     return name.strip().upper()
+
+
+# 都市圈/城市码 → 主机场 IATA（任务存储与 Google/OTA 深链统一用机场码）
+CITY_TO_PRIMARY_AIRPORT = {
+    "OSA": "KIX",
+    "TYO": "NRT",
+    "SEL": "ICN",
+    "SPK": "CTS",
+    "JKT": "CGK",
+    "NYC": "JFK",
+    "CHI": "ORD",
+    "WAS": "IAD",
+    "YTO": "YYZ",
+    "YMQ": "YUL",
+    "LON": "LHR",
+    "PAR": "CDG",
+    "ROM": "FCO",
+    "MIL": "MXP",
+    "SAO": "GRU",
+    "RIO": "GIG",
+    "BJS": "PEK",
+    "SIA": "XIY",
+}
+
+
+def canonical_airport_code(name: str) -> str:
+    """把城市码/别名规范成主机场码（任务落库、扫价 OD、Google 深链共用）。"""
+    code = resolve_airport(name)
+    return CITY_TO_PRIMARY_AIRPORT.get(code, code)
+
+
+def resolve_google_airport(name: str) -> str:
+    """兼容旧名：等同 canonical_airport_code。"""
+    return canonical_airport_code(name)

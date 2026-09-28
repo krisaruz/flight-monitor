@@ -111,12 +111,25 @@ docker compose up --build
 
 镜像内会安装 Playwright Chromium；需在 `.env` 中配置 `TRAVELPAYOUTS_TOKEN`。
 
+### 公开模式（博客访客免登录）
+
+在 `.env` 设置：
+
+```env
+PUBLIC_MODE=true
+MAX_CONCURRENT_SCANS=1
+```
+
+效果：无登录墙、无 admin/账户页；用 guest Cookie 隔离访客任务；禁止定时盯价；按 IP 限流扫价。
+
+阿里云 ECS 部署步骤见 [DEPLOY_ALIYUN.md](./DEPLOY_ALIYUN.md)。
+
 ## 使用流程
 
-1. **账户**页确认健康状态就绪，可选填写飞书 Webhook  
-2. **任务板**新建航线，或「一键示例：港阪扫价」  
+1. 确认 `/api/health` 为就绪（公开模式顶栏显示「公开检索」）  
+2. **任务板**新建航线并扫描  
 3. **详情页**看实时进度与核验价榜；点击携程 / 去哪儿 / Google 跳转核对  
-4. 需要盯价时：编辑任务开启定时，按间隔重复同一扫价核心  
+4. 非公开模式才可开启定时盯价与飞书 Webhook  
 
 扫价较慢（缓存扫窗 + 多组 OTA 核验属正常）；界面会持续输出阶段与已核验结果。
 

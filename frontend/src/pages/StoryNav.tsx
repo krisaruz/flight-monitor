@@ -13,6 +13,7 @@ import { reducedMotion } from '../utils/format'
 import '../styles/story.css'
 
 const SCENE_IDS = ['scene-hero', 'window', 'scene-airports', 'scene-verify', 'scene-notify', 'scene-final'] as const
+const SCENE_NAMES = ['日期雷达', '区间设定', '机场展开', '真价核验', '低价提醒', '准备出发'] as const
 
 function SceneBlock({
   id,
@@ -101,16 +102,42 @@ export default function StoryNav() {
   return (
     <div
       className="story"
-      style={{ ['--story-scroll' as string]: String(scrollProgress) }}
+      style={{
+        ['--story-scroll' as string]: String(scrollProgress),
+        ['--story-route-progress' as string]: String(1 - scrollProgress),
+      }}
     >
       <div className="story-ambient" aria-hidden />
+      <div className="story-grain" aria-hidden />
+      <div className="story-flightpath" aria-hidden>
+        <svg viewBox="0 0 1000 1000" preserveAspectRatio="none">
+          <path className="story-flightpath-base" d="M-40 160 C180 70 260 310 430 265 S690 100 770 390 S760 760 1040 850" />
+          <path className="story-flightpath-live" pathLength="1" d="M-40 160 C180 70 260 310 430 265 S690 100 770 390 S760 760 1040 850" />
+        </svg>
+      </div>
 
       <header className="story-top">
-        <span className="story-logo" aria-hidden>
-          Gatefare
+        <span className="story-logo" aria-label="Gatefare">
+          <span className="story-logo-mark" aria-hidden>
+            <span className="story-logo-mark-core" />
+          </span>
+          <span className="story-logo-word">
+            <span className="story-logo-text">Gatefare</span>
+            <span className="story-logo-tag">FLIGHT WATCH</span>
+          </span>
         </span>
-        <Link to="/login" className={`story-signin ${heroCtaReady ? '' : 'is-quiet'}`}>
-          登录
+        <div className="story-flight-readout" aria-live="polite" aria-atomic="true">
+          <span className="story-flight-code">GF-{String(scene + 1).padStart(2, '0')}</span>
+          <span className="story-flight-sep" aria-hidden />
+          <span className="story-flight-name">{SCENE_NAMES[scene]}</span>
+          <span className="story-flight-meta">
+            {String(scene + 1).padStart(2, '0')}
+            <span className="story-flight-meta-slash">/</span>
+            {String(SCENE_IDS.length).padStart(2, '0')}
+          </span>
+        </div>
+        <Link to="/app" className={`story-signin ${heroCtaReady ? '' : 'is-quiet'}`}>
+          进入任务板
         </Link>
       </header>
 

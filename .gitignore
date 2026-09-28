@@ -44,3 +44,7 @@ backups/
 frontend/backups/
 .agents/
 skills-lock.json
+
+# Ctrip/OTA login storage (never commit)
+secrets/
+
